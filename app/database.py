@@ -3,6 +3,7 @@ from beanie import init_beanie
 from app.config import settings
 from app.models.user import User
 from app.models.task import Task
+from app.models.project import Project
 
 async def init_db():
     client = AsyncIOMotorClient(settings.MONGODB_URL)
@@ -11,5 +12,6 @@ async def init_db():
         document_models=[
             User,
             Task,
+            Project,
         ]
     )

@@ -117,9 +117,12 @@ async def create_new_task(payload: TaskCreateSchema, current_user: User = Depend
     return make_task_response(new_task, assigned_to_res)
 
 @router.get("/", response_model=List[TaskResponseSchema])
-async def get_all_tasks(project_id: str, current_user: User = Depends(get_current_user)):
-    """Fetches all tasks/bugs for a specific project to display on the Kanban board."""
-    tasks = await Task.find(Task.project_id == project_id).to_list()
+async def get_all_tasks(project_id: Optional[str] = None, current_user: User = Depends(get_current_user)):
+    """Fetches tasks. If project_id is provided, fetches tasks for that project. Otherwise, fetches all tasks assigned to the current user."""
+    if project_id:
+        tasks = await Task.find(Task.project_id == project_id).to_list()
+    else:
+        tasks = await Task.find(Task.assigned_to_id == str(current_user.id)).to_list()
     
     response_list = []
     for task in tasks:

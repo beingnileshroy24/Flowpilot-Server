@@ -44,7 +44,12 @@ async def create_new_task(payload: TaskCreateSchema, current_user: User = Depend
     """Allows clients and managers (or developers) to raise an issue or create a task."""
     # Retrieve project
     from app.models.project import Project
-    project = await Project.get(payload.project_id)
+    from beanie import PydanticObjectId
+    
+    project = None
+    if PydanticObjectId.is_valid(payload.project_id):
+        project = await Project.get(payload.project_id)
+        
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -186,7 +191,12 @@ async def update_task(task_id: str, payload: TaskUpdateSchema, current_user: Use
         )
     
     from app.models.project import Project
-    project = await Project.get(task.project_id)
+    from beanie import PydanticObjectId
+    
+    project = None
+    if PydanticObjectId.is_valid(task.project_id):
+        project = await Project.get(task.project_id)
+        
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

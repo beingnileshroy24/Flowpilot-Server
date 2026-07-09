@@ -71,9 +71,21 @@ def test_task_operations_and_kanban_flow(client: TestClient):
     token = login_response.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
+    # 0. Create a project first
+    project_payload = {
+        "name": "Project 100",
+        "description": "Flowpilot Main Project",
+        "developer_ids": [dev_id],
+        "lead_developer_id": dev_id
+    }
+    project_response = client.post("/api/v1/projects/", json=project_payload, headers=headers)
+    assert project_response.status_code == 201
+    project_data = project_response.json()
+    project_id = project_data["id"]
+
     # 1. Create a task and assign it to Developer Alice
     task_payload = {
-        "project_id": "proj-100",
+        "project_id": project_id,
         "type": "BUG",
         "title": "Fix login button click crash",
         "description": "Clicking the login button twice in fast succession causes app to crash.",
@@ -88,15 +100,15 @@ def test_task_operations_and_kanban_flow(client: TestClient):
     assert response.status_code == 201
     task_data = response.json()
     assert task_data["title"] == task_payload["title"]
-    assert task_data["project_id"] == "proj-100"
+    assert task_data["project_id"] == project_id
     assert task_data["status"] == "TODO"
     assert task_data["priority"] == "HIGH"
     assert task_data["assigned_to"]["id"] == dev_id
     assert task_data["assigned_to"]["name"] == "Developer Alice"
     task_id = task_data["id"]
 
-    # 2. Get all tasks for Project ID: "proj-100"
-    response = client.get("/api/v1/tasks/?project_id=proj-100", headers=headers)
+    # 2. Get all tasks for Project ID
+    response = client.get(f"/api/v1/tasks/?project_id={project_id}", headers=headers)
     assert response.status_code == 200
     tasks = response.json()
     assert len(tasks) == 1

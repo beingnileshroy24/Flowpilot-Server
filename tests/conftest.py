@@ -26,4 +26,5 @@ def clean_database():
     db = client[settings.DATABASE_NAME]
     db["users"].delete_many({})
     db["tasks"].delete_many({})
+    db["projects"].delete_many({})
     client.close()

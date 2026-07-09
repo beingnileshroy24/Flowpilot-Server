@@ -7,7 +7,7 @@ from app.models.task import Task
 async def init_db():
     client = AsyncIOMotorClient(settings.MONGODB_URL)
     await init_beanie(
-        database=client[settings.DATABASE_NAME],
+        database=client[settings.DATABASE_NAME],  # type: ignore
         document_models=[
             User,
             Task,

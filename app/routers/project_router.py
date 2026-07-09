@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
 from app.models.project import Project
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.models.task import Task
 from app.schemas.project_schema import ProjectCreateSchema, ProjectUpdateSchema, ProjectResponseSchema
 from app.auth.dependencies import get_current_user
 
@@ -9,10 +10,35 @@ router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
 @router.post("/", response_model=ProjectResponseSchema, status_code=status.HTTP_201_CREATED)
 async def create_project(payload: ProjectCreateSchema, current_user: User = Depends(get_current_user)):
-    """Creates a new project owned by the current user."""
+    """Creates a new project. Only Managers and Admins can create projects and assign developers."""
+    if current_user.role not in [UserRole.MANAGER, UserRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers or administrators have permission to create projects."
+        )
+
+    dev_ids = payload.developer_ids or []
+    lead_id = payload.lead_developer_id
+
+    if len(dev_ids) > 1:
+        if not lead_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A Lead Developer must be chosen if more than one developer is assigned."
+            )
+        if lead_id not in dev_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The Lead Developer must be one of the assigned developers."
+            )
+    elif len(dev_ids) == 1:
+        lead_id = dev_ids[0]
+
     new_project = Project(
         name=payload.name,
         description=payload.description,
+        developer_ids=dev_ids,
+        lead_developer_id=lead_id,
         github_frontend=payload.github_frontend,
         github_backend=payload.github_backend,
         test_server=payload.test_server,
@@ -43,7 +69,7 @@ async def get_project(project_id: str, current_user: User = Depends(get_current_
 
 @router.patch("/{project_id}", response_model=ProjectResponseSchema)
 async def update_project(project_id: str, payload: ProjectUpdateSchema, current_user: User = Depends(get_current_user)):
-    """Updates details of an existing project (e.g. repo links, servers, MongoDB connection string)."""
+    """Updates details of an existing project. Managers (owners) and Lead Developers have write access."""
     project = await Project.get(project_id)
     if not project:
         raise HTTPException(
@@ -51,9 +77,70 @@ async def update_project(project_id: str, payload: ProjectUpdateSchema, current_
             detail="Project not found"
         )
     
+    is_owner = project.owner_id == str(current_user.id)
+    is_lead = project.lead_developer_id == str(current_user.id)
+    is_admin = current_user.role == UserRole.ADMIN
+    is_manager = current_user.role == UserRole.MANAGER
+
+    if not (is_owner or is_lead or is_admin or is_manager):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the Project Manager (owner) or the Lead Developer have permission to configure project details."
+        )
+
     update_data = payload.model_dump(exclude_unset=True)
+
+    # Permission check for changing developer assignments (only manager or admin)
+    if "developer_ids" in update_data or "lead_developer_id" in update_data:
+        if not (is_manager or is_admin):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only project managers and administrators can change developer assignments or modify the lead developer."
+            )
+        
+        # Validation checks
+        new_devs = update_data.get("developer_ids", project.developer_ids) or []
+        new_lead = update_data.get("lead_developer_id", project.lead_developer_id)
+
+        if len(new_devs) > 1:
+            if not new_lead:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="A Lead Developer must be chosen if more than one developer is assigned."
+                )
+            if new_lead not in new_devs:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="The Lead Developer must be one of the assigned developers."
+                )
+        elif len(new_devs) == 1:
+            update_data["lead_developer_id"] = new_devs[0]
+
     for field, value in update_data.items():
         setattr(project, field, value)
     
     await project.save()
     return project
+
+@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project(project_id: str, current_user: User = Depends(get_current_user)):
+    """Deletes a project and all associated tasks. Only Managers and Admins can delete projects."""
+    if current_user.role not in [UserRole.MANAGER, UserRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers or administrators have permission to delete projects."
+        )
+
+    project = await Project.get(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found"
+        )
+
+    # Delete all tasks associated with this project
+    await Task.find(Task.project_id == project_id).delete()
+    
+    # Delete project
+    await project.delete()
+    return None

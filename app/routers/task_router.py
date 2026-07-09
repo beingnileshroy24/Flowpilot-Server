@@ -1,12 +1,33 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from typing import List, Optional
 from datetime import datetime, timezone
+import shutil
+import uuid
+import os
 from app.models.task import Task, TaskStatus
 from app.models.user import User
 from app.schemas.task_schema import TaskCreateSchema, TaskUpdateSchema, TaskResponseSchema
 from app.auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
+
+@router.post("/upload")
+async def upload_task_media(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    """Handles uploading task attachments (images or videos)."""
+    os.makedirs("uploads", exist_ok=True)
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Filename is missing or invalid."
+        )
+    file_ext = os.path.splitext(file.filename)[1]
+    unique_filename = f"{uuid.uuid4()}{file_ext}"
+    file_path = f"uploads/{unique_filename}"
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    return {"url": f"/uploads/{unique_filename}"}
 
 def make_task_response(task: Task, assigned_to_res: Optional[User]) -> TaskResponseSchema:
     """Helper to convert Beanie Task to TaskResponseSchema safely."""

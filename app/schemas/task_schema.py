@@ -16,6 +16,7 @@ class TaskCreateSchema(BaseModel):
     assigned_to_id: Optional[str] = Field(None, description="User ID of the assignee")
     estimated_hours: float = Field(0.0, ge=0.0)
     tags: List[str] = Field(default_factory=list)
+    attachment_url: Optional[str] = None
 
 class TaskUpdateSchema(BaseModel):
     title: Optional[str] = Field(None, min_length=3, max_length=200)
@@ -28,6 +29,7 @@ class TaskUpdateSchema(BaseModel):
     estimated_hours: Optional[float] = Field(None, ge=0.0)
     actual_hours: Optional[float] = Field(None, ge=0.0)
     tags: Optional[List[str]] = None
+    attachment_url: Optional[str] = None
 
 class TaskResponseSchema(BaseModel):
     id: PydanticObjectId
@@ -42,6 +44,7 @@ class TaskResponseSchema(BaseModel):
     estimated_hours: float
     actual_hours: float
     tags: List[str]
+    attachment_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

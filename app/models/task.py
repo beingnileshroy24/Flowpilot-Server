@@ -34,6 +34,7 @@ class Task(Document):
     estimated_hours: float = 0.0
     actual_hours: float = 0.0
     tags: List[str] = []
+    attachment_url: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

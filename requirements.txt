@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+beanie
+motor
+pydantic[email]
+pydantic-settings
+pyjwt
+bcrypt
+pytest
+httpx
+python-multipart

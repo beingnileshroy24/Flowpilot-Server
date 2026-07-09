@@ -4,6 +4,7 @@ from app.config import settings
 from app.models.user import User
 from app.models.task import Task
 from app.models.project import Project
+from app.models.notification import Notification
 
 async def init_db():
     client = AsyncIOMotorClient(settings.MONGODB_URL)
@@ -13,5 +14,6 @@ async def init_db():
             User,
             Task,
             Project,
+            Notification,
         ]
     )

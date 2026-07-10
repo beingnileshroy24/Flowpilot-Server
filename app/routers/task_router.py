@@ -6,6 +6,7 @@ import uuid
 import os
 from app.models.task import Task, TaskStatus
 from app.models.user import User, UserRole
+from app.models.activity_log import ActivityLog
 from app.schemas.task_schema import TaskCreateSchema, TaskUpdateSchema, TaskResponseSchema
 from app.auth.dependencies import get_current_user
 
@@ -111,6 +112,17 @@ async def create_new_task(payload: TaskCreateSchema, current_user: User = Depend
         created_by_name=current_user.name
     )
     await notification.insert()
+
+    # Create activity log for task creation
+    activity = ActivityLog(
+        task_id=str(new_task.id),
+        project_id=new_task.project_id,
+        user_id=str(current_user.id),
+        user_name=current_user.name,
+        action="task_created",
+        detail=f"Created {new_task.type.value.lower()} '{new_task.title}'"
+    )
+    await activity.insert()
     
     # Construct task response manual mapping
     assigned_to_res = None
@@ -168,9 +180,21 @@ async def update_task_status(task_id: str, current_status: TaskStatus, current_u
             detail="Task not found"
         )
     
+    old_status = task.status.value
     task.status = current_status
     task.updated_at = datetime.now(timezone.utc)
     await task.save()
+
+    # Activity log for status change
+    activity = ActivityLog(
+        task_id=str(task.id),
+        project_id=task.project_id,
+        user_id=str(current_user.id),
+        user_name=current_user.name,
+        action="status_change",
+        detail=f"Changed status from {old_status} to {current_status.value} on '{task.title}'"
+    )
+    await activity.insert()
     
     assigned_to_res = None
     if task.assigned_to_id:
@@ -242,11 +266,31 @@ async def update_task(task_id: str, payload: TaskUpdateSchema, current_user: Use
                     detail=f"Assignee user with ID {new_assignee_id} not found"
                 )
                 
+    # Track assignment change for activity log
+    old_assignee_id = task.assigned_to_id
+
     for field, value in update_data.items():
         setattr(task, field, value)
         
     task.updated_at = datetime.now(timezone.utc)
     await task.save()
+
+    # Activity log for assignment change
+    if "assigned_to_id" in update_data and update_data["assigned_to_id"] != old_assignee_id:
+        new_assignee_name = "Unassigned"
+        if task.assigned_to_id:
+            assignee_user = await User.get(task.assigned_to_id)
+            if assignee_user:
+                new_assignee_name = assignee_user.name
+        activity = ActivityLog(
+            task_id=str(task.id),
+            project_id=task.project_id,
+            user_id=str(current_user.id),
+            user_name=current_user.name,
+            action="assignment_change",
+            detail=f"Assigned '{task.title}' to {new_assignee_name}"
+        )
+        await activity.insert()
     
     assigned_to_res = None
     if task.assigned_to_id:

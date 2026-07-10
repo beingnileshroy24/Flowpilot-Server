@@ -2,7 +2,7 @@ from enum import Enum
 from datetime import datetime, timezone
 from typing import Optional, List
 from beanie import Document
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 class TaskType(str, Enum):
     EPIC = "EPIC"
@@ -22,6 +22,10 @@ class TaskPriority(str, Enum):
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
 
+class ChecklistItem(BaseModel):
+    text: str
+    done: bool = False
+
 class Task(Document):
     project_id: str
     type: TaskType
@@ -35,6 +39,10 @@ class Task(Document):
     actual_hours: float = 0.0
     tags: List[str] = []
     attachment_url: Optional[str] = None
+    due_date: Optional[str] = None
+    sprint_id: Optional[str] = None
+    release_id: Optional[str] = None
+    checklist_items: List[ChecklistItem] = []
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

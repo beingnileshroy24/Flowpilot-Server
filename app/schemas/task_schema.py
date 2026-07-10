@@ -5,6 +5,12 @@ from datetime import datetime
 from app.models.task import TaskType, TaskStatus, TaskPriority
 from app.schemas.user_schema import UserResponseSchema
 
+
+class ChecklistItemSchema(BaseModel):
+    text: str
+    done: bool = False
+
+
 class TaskCreateSchema(BaseModel):
     project_id: str = Field(..., description="Project ID this task belongs to")
     type: TaskType = Field(TaskType.TASK)
@@ -17,6 +23,11 @@ class TaskCreateSchema(BaseModel):
     estimated_hours: float = Field(0.0, ge=0.0)
     tags: List[str] = Field(default_factory=list)
     attachment_url: Optional[str] = None
+    due_date: Optional[str] = None
+    sprint_id: Optional[str] = None
+    release_id: Optional[str] = None
+    checklist_items: List[ChecklistItemSchema] = Field(default_factory=list)
+
 
 class TaskUpdateSchema(BaseModel):
     title: Optional[str] = Field(None, min_length=3, max_length=200)
@@ -30,6 +41,11 @@ class TaskUpdateSchema(BaseModel):
     actual_hours: Optional[float] = Field(None, ge=0.0)
     tags: Optional[List[str]] = None
     attachment_url: Optional[str] = None
+    due_date: Optional[str] = None
+    sprint_id: Optional[str] = None
+    release_id: Optional[str] = None
+    checklist_items: Optional[List[ChecklistItemSchema]] = None
+
 
 class TaskResponseSchema(BaseModel):
     id: PydanticObjectId
@@ -45,6 +61,10 @@ class TaskResponseSchema(BaseModel):
     actual_hours: float
     tags: List[str]
     attachment_url: Optional[str] = None
+    due_date: Optional[str] = None
+    sprint_id: Optional[str] = None
+    release_id: Optional[str] = None
+    checklist_items: List[ChecklistItemSchema] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

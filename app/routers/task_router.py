@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
-from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
+from typing import List, Optional, Any
 from datetime import datetime, timezone
 import shutil
 import uuid
@@ -14,6 +14,23 @@ import httpx
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+async def emit_sync_event(action_type: str, task_document: dict):
+    """
+    Asynchronously dispatches task mutation event payloads to the sync service.
+    """
+    try:
+        from app.services.sync_service import sync_task_event
+        cleaned_doc: dict[str, Any] = {}
+        for k, v in task_document.items():
+            if k in ["id", "_id", "project_id", "assigned_to_id", "sprint_id", "release_id", "parent_id"]:
+                cleaned_doc[k] = str(v) if v is not None else None
+            else:
+                cleaned_doc[k] = v
+        await sync_task_event(action_type, cleaned_doc)
+    except Exception as e:
+        logger.error(f"Failed to dispatch sync event {action_type} for task {task_document.get('id')}: {str(e)}")
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
 
@@ -46,7 +63,7 @@ def make_task_response(task: Task, assigned_to_res: Optional[User]) -> TaskRespo
     )
 
 @router.post("/", response_model=TaskResponseSchema, status_code=status.HTTP_201_CREATED)
-async def create_new_task(payload: TaskCreateSchema, current_user: User = Depends(get_current_user)):
+async def create_new_task(payload: TaskCreateSchema, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
     """Allows clients and managers (or developers) to raise an issue or create a task."""
     # Retrieve project
     from app.models.project import Project
@@ -136,6 +153,7 @@ async def create_new_task(payload: TaskCreateSchema, current_user: User = Depend
         if user:
             assigned_to_res = user
             
+    background_tasks.add_task(emit_sync_event, "create", new_task.model_dump())
     return make_task_response(new_task, assigned_to_res)
 
 @router.get("/", response_model=List[TaskResponseSchema])
@@ -176,7 +194,7 @@ async def get_task_by_id(task_id: str, current_user: User = Depends(get_current_
     return make_task_response(task, assigned_to_res)
 
 @router.patch("/{task_id}/status", response_model=TaskResponseSchema)
-async def update_task_status(task_id: str, current_status: TaskStatus, current_user: User = Depends(get_current_user)):
+async def update_task_status(task_id: str, current_status: TaskStatus, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
     """Allows developers or managers to progress a ticket through the workflow stages."""
     task = await Task.get(task_id)
     if not task:
@@ -207,10 +225,11 @@ async def update_task_status(task_id: str, current_status: TaskStatus, current_u
         if user:
             assigned_to_res = user
             
+    background_tasks.add_task(emit_sync_event, "update", task.model_dump())
     return make_task_response(task, assigned_to_res)
 
 @router.patch("/{task_id}", response_model=TaskResponseSchema)
-async def update_task(task_id: str, payload: TaskUpdateSchema, current_user: User = Depends(get_current_user)):
+async def update_task(task_id: str, payload: TaskUpdateSchema, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
     """Allows updates to details like title, description, estimates, and assignees."""
     task = await Task.get(task_id)
     if not task:
@@ -303,6 +322,7 @@ async def update_task(task_id: str, payload: TaskUpdateSchema, current_user: Use
         if user:
             assigned_to_res = user
             
+    background_tasks.add_task(emit_sync_event, "update", task.model_dump())
     return make_task_response(task, assigned_to_res)
 
 
@@ -345,3 +365,32 @@ async def check_task_duplicates(
         max_similarity_score=0.0,
         matches=[]
     )
+
+
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Deletes a task. Only Managers and Admins can delete tasks.
+    Triggers a background sync event with 'delete' action.
+    """
+    if current_user.role not in [UserRole.MANAGER, UserRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers or administrators have permission to delete tasks."
+        )
+    task = await Task.get(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found"
+        )
+    
+    task_dict = task.model_dump()
+    await task.delete()
+    
+    background_tasks.add_task(emit_sync_event, "delete", task_dict)
+

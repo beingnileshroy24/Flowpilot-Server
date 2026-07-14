@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from unittest.mock import patch, AsyncMock
 
 def test_auth_and_user_endpoints(client: TestClient):
     # 1. Sign up a new user
@@ -182,4 +183,112 @@ def test_duplicate_check_endpoint(client: TestClient):
     assert res_data["is_potential_duplicate"] is False
     assert res_data["max_similarity_score"] == 0.0
     assert res_data["matches"] == []
+
+
+@patch("app.services.sync_service.sync_task_event", new_callable=AsyncMock)
+def test_task_mutations_and_sync_dispatcher(mock_sync, client: TestClient):
+    # Register manager user (so they can perform create, update, delete)
+    signup_payload = {
+        "name": "Sync Manager",
+        "email": "sync_mgr@example.com",
+        "password": "mgrpassword",
+        "role": "MANAGER"
+    }
+    client.post("/api/v1/auth/signup", json=signup_payload)
+    login_response = client.post("/api/v1/auth/login", data={
+        "username": "sync_mgr@example.com",
+        "password": "mgrpassword"
+    })
+    token = login_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Register developer user to assign tasks to
+    dev_response = client.post("/api/v1/auth/signup", json={
+        "name": "Sync Dev",
+        "email": "sync_dev@example.com",
+        "password": "devpassword",
+        "role": "DEVELOPER"
+    })
+    dev_id = dev_response.json()["id"]
+
+    # Create a project first
+    project_payload = {
+        "name": "Project for Sync Test",
+        "description": "Sync Verification Project",
+        "developer_ids": [dev_id],
+        "lead_developer_id": dev_id
+    }
+    project_res = client.post("/api/v1/projects/", json=project_payload, headers=headers)
+    project_id = project_res.json()["id"]
+
+    # 1. Test CREATE task event
+    task_payload = {
+        "project_id": project_id,
+        "type": "TASK",
+        "title": "Task for sync checks",
+        "description": "Verify LanceDB sync dispatcher",
+        "assigned_to_id": dev_id
+    }
+    res = client.post("/api/v1/tasks/", json=task_payload, headers=headers)
+    assert res.status_code == 201
+    task_id = res.json()["id"]
+    
+    assert mock_sync.call_count == 1
+    assert mock_sync.call_args[0][0] == "create"
+    created_task = mock_sync.call_args[0][1]
+    assert created_task["id"] == task_id
+    assert created_task["project_id"] == project_id
+    assert created_task["title"] == "Task for sync checks"
+    assert created_task["description"] == "Verify LanceDB sync dispatcher"
+    assert created_task["assigned_to_id"] == dev_id
+    
+    # Reset mock call history
+    mock_sync.reset_mock()
+
+    # 2. Test STATUS UPDATE task event
+    res = client.patch(f"/api/v1/tasks/{task_id}/status?current_status=IN_PROGRESS", headers=headers)
+    assert res.status_code == 200
+    assert mock_sync.call_count == 1
+    assert mock_sync.call_args[0][0] == "update"
+    assert mock_sync.call_args[0][1]["status"] == "IN_PROGRESS"
+
+    mock_sync.reset_mock()
+
+    # 3. Test GENERAL UPDATE task event
+    update_payload = {
+        "title": "Updated Task for sync checks",
+        "description": "Updated description"
+    }
+    res = client.patch(f"/api/v1/tasks/{task_id}", json=update_payload, headers=headers)
+    assert res.status_code == 200
+    assert mock_sync.call_count == 1
+    assert mock_sync.call_args[0][0] == "update"
+    assert mock_sync.call_args[0][1]["title"] == "Updated Task for sync checks"
+    assert mock_sync.call_args[0][1]["description"] == "Updated description"
+
+    mock_sync.reset_mock()
+
+    # 4. Test DELETE task event
+    # First test unauthorized delete as developer (DEVELOPER role)
+    dev_login = client.post("/api/v1/auth/login", data={
+        "username": "sync_dev@example.com",
+        "password": "devpassword"
+    })
+    dev_token = dev_login.json()["access_token"]
+    dev_headers = {"Authorization": f"Bearer {dev_token}"}
+    
+    del_res = client.delete(f"/api/v1/tasks/{task_id}", headers=dev_headers)
+    assert del_res.status_code == 403
+    assert mock_sync.call_count == 0
+
+    # Delete as Manager
+    del_res = client.delete(f"/api/v1/tasks/{task_id}", headers=headers)
+    assert del_res.status_code == 204
+    assert mock_sync.call_count == 1
+    assert mock_sync.call_args[0][0] == "delete"
+    assert mock_sync.call_args[0][1]["id"] == task_id
+
+    # Verify task is actually deleted from DB
+    get_res = client.get(f"/api/v1/tasks/{task_id}", headers=headers)
+    assert get_res.status_code == 404
 

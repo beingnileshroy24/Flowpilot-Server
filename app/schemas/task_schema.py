@@ -69,3 +69,22 @@ class TaskResponseSchema(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class TaskCheckSchema(BaseModel):
+    title: str = Field(..., min_length=6, description="Title of the task to check duplicates for")
+    description: Optional[str] = Field("", description="Description of the task")
+
+
+class DuplicateMatchSchema(BaseModel):
+    task_id: str
+    title: str
+    status: str
+    similarity: float
+
+
+class TaskCheckResponseSchema(BaseModel):
+    is_potential_duplicate: bool
+    max_similarity_score: float
+    matches: List[DuplicateMatchSchema]
+

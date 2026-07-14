@@ -137,3 +137,49 @@ def test_task_operations_and_kanban_flow(client: TestClient):
     assert final_task["description"] == update_payload["description"]
     assert final_task["actual_hours"] == 4.0
     assert final_task["status"] == "IN_REVIEW"
+
+
+def test_duplicate_check_endpoint(client: TestClient):
+    # 1. Test unauthorized duplicate check
+    response = client.post("/api/v1/tasks/check-duplicates", json={
+        "title": "Validate OAuth Token flow",
+        "description": "Short description"
+    })
+    assert response.status_code == 401
+
+    # 2. Login to get token
+    signup_payload = {
+        "name": "Tester Person",
+        "email": "tester@example.com",
+        "password": "testerpassword",
+        "role": "DEVELOPER"
+    }
+    client.post("/api/v1/auth/signup", json=signup_payload)
+    login_data = {
+        "username": "tester@example.com",
+        "password": "testerpassword"
+    }
+    login_response = client.post("/api/v1/auth/login", data=login_data)
+    token = login_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 3. Test validation constraint: title too short (<= 5 characters)
+    short_title_payload = {
+        "title": "Short",  # 5 chars
+        "description": "Valid description"
+    }
+    response = client.post("/api/v1/tasks/check-duplicates", json=short_title_payload, headers=headers)
+    assert response.status_code == 422
+
+    # 4. Test valid payload (since AI engine isn't running, it should handle connection error/timeout gracefully and return empty list)
+    valid_payload = {
+        "title": "My custom valid title checking",  # > 5 chars
+        "description": "This is a detailed description of some random problem"
+    }
+    response = client.post("/api/v1/tasks/check-duplicates", json=valid_payload, headers=headers)
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["is_potential_duplicate"] is False
+    assert res_data["max_similarity_score"] == 0.0
+    assert res_data["matches"] == []
+

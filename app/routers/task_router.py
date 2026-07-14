@@ -7,8 +7,13 @@ import os
 from app.models.task import Task, TaskStatus
 from app.models.user import User, UserRole
 from app.models.activity_log import ActivityLog
-from app.schemas.task_schema import TaskCreateSchema, TaskUpdateSchema, TaskResponseSchema
+from app.schemas.task_schema import TaskCreateSchema, TaskUpdateSchema, TaskResponseSchema, TaskCheckSchema, TaskCheckResponseSchema
 from app.auth.dependencies import get_current_user
+from app.config import settings
+import httpx
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
 
@@ -299,3 +304,44 @@ async def update_task(task_id: str, payload: TaskUpdateSchema, current_user: Use
             assigned_to_res = user
             
     return make_task_response(task, assigned_to_res)
+
+
+@router.post("/check-duplicates", response_model=TaskCheckResponseSchema)
+async def check_task_duplicates(
+    payload: TaskCheckSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Checks if a potential task is a duplicate by calling the internal AI engine.
+    Safe timeout handling: If FastAPI AI engine times out (>1500ms) or errors,
+    returns an empty list structure with a logged warning.
+    """
+    truncated_description = payload.description[:4096] if payload.description else ""
+
+    forward_payload = {
+        "title": payload.title,
+        "description": truncated_description
+    }
+
+    url = f"{settings.AI_ENGINE_URL}/check-duplicates"
+
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            response = await client.post(url, json=forward_payload)
+            if response.status_code == 200:
+                data = response.json()
+                return TaskCheckResponseSchema(**data)
+            else:
+                logger.warning(
+                    f"AI Engine returned status code {response.status_code} for duplicate check: {response.text}"
+                )
+    except httpx.TimeoutException:
+        logger.warning(f"AI Engine timed out checking duplicates for title: {payload.title}")
+    except Exception as e:
+        logger.warning(f"Failed to check duplicates with AI Engine: {str(e)}")
+
+    return TaskCheckResponseSchema(
+        is_potential_duplicate=False,
+        max_similarity_score=0.0,
+        matches=[]
+    )

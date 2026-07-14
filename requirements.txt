@@ -9,3 +9,5 @@ bcrypt
 pytest
 httpx
 python-multipart
+torch
+transformers

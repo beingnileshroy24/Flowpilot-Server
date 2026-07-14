@@ -116,3 +116,8 @@ active_env/
 .env
 .env.*
 !.env.example
+
+# LanceDB stores
+.lancedb_store/
+.lancedb_test_store/
+.test_db/

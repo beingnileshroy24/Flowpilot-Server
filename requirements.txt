@@ -11,3 +11,5 @@ httpx
 python-multipart
 torch
 transformers
+lancedb
+pyarrow

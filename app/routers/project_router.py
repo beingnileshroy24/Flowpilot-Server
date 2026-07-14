@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from typing import List
 from app.models.project import Project
 from app.models.user import User, UserRole
+from app.services.sync_service import cleanup_project_vectors
 from app.models.task import Task
 from app.schemas.project_schema import ProjectCreateSchema, ProjectUpdateSchema, ProjectResponseSchema
 from app.auth.dependencies import get_current_user
@@ -123,7 +124,7 @@ async def update_project(project_id: str, payload: ProjectUpdateSchema, current_
     return project
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: str, current_user: User = Depends(get_current_user)):
+async def delete_project(project_id: str, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
     """Deletes a project and all associated tasks. Only Managers and Admins can delete projects."""
     if current_user.role not in [UserRole.MANAGER, UserRole.ADMIN]:
         raise HTTPException(
@@ -143,4 +144,8 @@ async def delete_project(project_id: str, current_user: User = Depends(get_curre
     
     # Delete project
     await project.delete()
+    
+    # Sweep orphaned vectors in LanceDB asynchronously
+    background_tasks.add_task(cleanup_project_vectors, project_id)
+    
     return None

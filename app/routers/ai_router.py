@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from typing import Any
 
 from app.schemas.ai_schema import DuplicateCheckRequest, DuplicateCheckResponse, DuplicateMatch
 from app.auth.dependencies import get_current_user
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.ai.core.embedder import ModernBertEmbedderSingleton
 from app.ai.storage.lancedb_client import LanceDBManager
+from app.services.sync_service import rebuild_vector_index
 
 router = APIRouter(
     prefix="/api/v1/ai",
@@ -72,3 +73,22 @@ async def check_duplicates(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"FastAPI core failures: {str(e)}"
         )
+
+@router.post("/sync-recovery")
+async def sync_recovery(
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user)
+) -> Any:
+    """
+    Administrative recovery pipeline that rebuilds cleanly aligned vector tables from scratch.
+    Requires ADMIN privileges.
+    """
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only administrators can trigger the recovery pipeline."
+        )
+    
+    background_tasks.add_task(rebuild_vector_index)
+    
+    return {"message": "Administrative recovery pipeline initiated successfully."}

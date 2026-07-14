@@ -5,6 +5,7 @@ from app.routers.project_router import router as project_router
 from app.routers.notification_router import router as notification_router
 from app.routers.comment_router import router as comment_router
 from app.routers.activity_log_router import router as activity_log_router
+from app.routers.ai_router import router as ai_router
 
 __all__ = [
     "auth_router",
@@ -14,4 +15,5 @@ __all__ = [
     "notification_router",
     "comment_router",
     "activity_log_router",
+    "ai_router",
 ]

@@ -1,0 +1,426 @@
+import re
+import json
+import logging
+import time
+import uuid
+import os
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import List, Dict, Any, AsyncGenerator, Optional
+
+from app.ai.core.llm_manager import llm_manager
+from app.ai.core.embedder import ModernBertEmbedderSingleton
+from app.ai.storage.lancedb_client import LanceDBManager
+from app.ai.storage.hybrid_retriever import HybridRetriever
+from app.ai.prompts.nwbe_templates import REACT_PLANNING_TEMPLATE, GROUNDED_SYNTHESIS_TEMPLATE
+from app.models.task import Task, TaskStatus, TaskPriority
+from app.models.project import Project
+from app.models.user import User, UserRole
+
+# Ensure logs directory exists
+os.makedirs("logs", exist_ok=True)
+
+# Dedicated file logger for AgentEngine
+agent_logger = logging.getLogger("copilot_agent")
+agent_logger.setLevel(logging.INFO)
+if agent_logger.hasHandlers():
+    agent_logger.handlers.clear()
+
+file_handler = logging.FileHandler("logs/copilot_agent.log")
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+agent_logger.addHandler(file_handler)
+
+class AgentEngine:
+    def __init__(self):
+        self.lancedb_manager = LanceDBManager()
+        self.embedder = ModernBertEmbedderSingleton()
+        self.hybrid_retriever = HybridRetriever(self.lancedb_manager, self.embedder)
+        self.conversation_history = defaultdict(list)
+
+    def count_tokens(self, text: str) -> int:
+        if llm_manager.tokenizer is not None:
+            try:
+                return len(llm_manager.tokenizer.encode(text))
+            except Exception:
+                pass
+        # Fallback estimation
+        return len(text.split()) + len(text) // 4
+
+    async def process_query(self, user_query: str, project_id: str) -> AsyncGenerator[str, None]:
+        """
+        Agentic Orchestration and Tools Routing Loop.
+        Evaluates incoming queries, references history, executes tools, and streams response.
+        """
+        start_time = time.time()
+        agent_logger.info(f"Starting process_query for project_id={project_id}, query='{user_query}'")
+        
+        # 1. Reference conversation history cache
+        history = self.conversation_history[project_id]
+        conversation_log = ""
+        if history:
+            conversation_log += "=== Prior Conversation History ===\n"
+            for idx, turn in enumerate(history):
+                conversation_log += f"Turn {idx + 1} - User: {turn['query']}\nTurn {idx + 1} - Agent Response: {turn['response']}\n"
+            conversation_log += "==================================\n\n"
+            
+        all_retrieved_items = []
+        
+        # 2. ReAct planning loop
+        for iteration in range(3):
+            planning_prompt = REACT_PLANNING_TEMPLATE.format(
+                query=user_query,
+                context_scope=json.dumps({"project_id": project_id}),
+                conversation_log=conversation_log or "No actions taken yet."
+            )
+            
+            logger_response_time = time.time()
+            llm_response = llm_manager.generate(planning_prompt, max_tokens=512)
+            
+            think_content = ""
+            think_match = re.search(r"<think>(.*?)</think>", llm_response, re.DOTALL)
+            if think_match:
+                think_content = think_match.group(1).strip()
+                yield f"data: {json.dumps({'thought': f'[Step {iteration + 1}] ' + think_content})}\n\n"
+                
+            tool_action = self._parse_tool_action(llm_response)
+            action_name = tool_action.get("name")
+            args = tool_action.get("args", {})
+            
+            if action_name == "finalize" or not action_name:
+                break
+                
+            # Log executed tool pattern
+            agent_logger.info(f"Executed tool pattern: {action_name}({args})")
+            
+            retrieved_items = []
+            error_msg = None
+            tool_start_time = time.time()
+            
+            try:
+                if action_name == "search_backlog":
+                    retrieved_items = await self._tool_search_backlog(project_id, args)
+                elif action_name == "read_document_chunk":
+                    retrieved_items = await self._tool_read_document_chunk(project_id, args)
+                elif action_name == "get_team_workload_metrics":
+                    t_project_id = args.get("project_id") or project_id
+                    retrieved_items = await self._tool_get_team_workload_metrics(t_project_id)
+                else:
+                    error_msg = f"Unknown tool: {action_name}"
+            except Exception as e:
+                error_msg = str(e)
+                agent_logger.error(f"Tool execution failed: {error_msg}")
+                
+            tool_duration = time.time() - tool_start_time
+            agent_logger.info(f"Tool execution timeframe: {tool_duration:.4f}s")
+            
+            if error_msg:
+                observation = f"Error executing tool: {error_msg}"
+            else:
+                observation = f"Executed {action_name} successfully. Gathered {len(retrieved_items)} items."
+                all_retrieved_items.extend(retrieved_items)
+                
+            conversation_log += f"Thought: {think_content}\nAction: {action_name}({args})\nObservation: {observation}\n"
+
+        # Secondary search blending via HybridRetriever
+        try:
+            secondary_items = self.hybrid_retriever.search_hybrid(
+                query=user_query,
+                project_id=project_id,
+                limit=5
+            )
+            # Log similarity distance scores
+            for item in secondary_items:
+                if "similarity" in item:
+                    distance = 2.0 * (1.0 - item["similarity"])
+                    agent_logger.info(f"Vector distance score: {distance:.4f} (similarity: {item['similarity']:.4f})")
+            all_retrieved_items.extend(secondary_items)
+        except Exception as e:
+            agent_logger.error(f"Secondary hybrid search failed: {str(e)}")
+
+        # Deduplicate and rank items
+        fused_items = self._deduplicate_and_rank(all_retrieved_items)
+        
+        # 3. Validation: Enforce max context depth <= 4000 tokens
+        pruned_context = self._assemble_and_prune_context(fused_items, max_tokens=4000)
+        
+        # 4. Stream response
+        synthesis_prompt = GROUNDED_SYNTHESIS_TEMPLATE.format(
+            context=pruned_context,
+            query=user_query
+        )
+        
+        full_response = ""
+        async for chunk in llm_manager.stream_generate(synthesis_prompt):
+            full_response += chunk
+            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+            
+        # Parse final response to cache without thought tags
+        clean_response = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
+        self.conversation_history[project_id].append({
+            "query": user_query,
+            "response": clean_response
+        })
+        
+        total_duration = time.time() - start_time
+        agent_logger.info(f"Total process_query timeframe: {total_duration:.4f}s")
+        yield "data: [DONE]\n\n"
+
+    def _parse_tool_action(self, response_text: str) -> dict:
+        action_match = re.search(r"Action:\s*(\w+)\((.*)\)", response_text)
+        if not action_match:
+            return {"name": "search_backlog", "args": {}}
+
+        name = action_match.group(1)
+        args_str = action_match.group(2)
+        args: Dict[str, Any] = {}
+        kwarg_matches = re.finditer(r"(\w+)\s*=\s*(?:[\"'](.*?)[\"']|(\d+))", args_str)
+        for m in kwarg_matches:
+            key = m.group(1)
+            val_str = m.group(2)
+            val_num = m.group(3)
+            if val_num is not None:
+                args[key] = int(val_num)
+            else:
+                args[key] = val_str
+        return {"name": name, "args": args}
+
+    def _deduplicate_and_rank(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        deduped = []
+        for item in items:
+            if not item:
+                continue
+            key = (item.get("entity_type"), item.get("source_id"))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(item)
+        return deduped
+
+    def _assemble_and_prune_context(self, items: List[Dict[str, Any]], max_tokens: int = 4000) -> str:
+        context_blocks = []
+        current_tokens = 0
+        
+        for item in items:
+            metadata = item.get("metadata", {})
+            citation_hash = metadata.get("citation_hash", "")
+            if not citation_hash:
+                citation_hash = f"cit_{uuid.uuid4().hex[:5]}"
+                metadata["citation_hash"] = citation_hash
+
+            entity_type = item.get("entity_type", "UNKNOWN")
+            title = metadata.get("title") or metadata.get("filename") or metadata.get("task_ref") or "N/A"
+            status = metadata.get("status") or "N/A"
+            sprint = metadata.get("sprint") or "N/A"
+            content_snippet = item.get("content_snippet", "")
+            
+            block = (
+                f"=========================================\n"
+                f"RETRIEVED WORKSPACE CONTEXT ELEMENT: [ID: {citation_hash}]\n"
+                f"Type: {entity_type} | Title: {title}\n"
+                f"Status: {status} | Sprint: {sprint}\n"
+                f"Content: {content_snippet}\n"
+                f"=========================================\n"
+            )
+            
+            block_tokens = self.count_tokens(block)
+            if current_tokens + block_tokens > max_tokens:
+                agent_logger.info(f"Context pruned: reached token limit at {current_tokens} tokens.")
+                break
+                
+            context_blocks.append(block)
+            current_tokens += block_tokens
+            
+        return "".join(context_blocks)
+
+    async def _tool_search_backlog(self, project_id: str, args: dict) -> List[Dict[str, Any]]:
+        query = args.get("query")
+        status_val = args.get("status")
+        sprint_title = args.get("sprint")
+        
+        vector_results = []
+        mongo_results = []
+        
+        if query:
+            vector_results = self.hybrid_retriever.search_hybrid(query, project_id, limit=5)
+            
+        if status_val or sprint_title:
+            filters: List[Any] = [Task.project_id == project_id]
+            if sprint_title:
+                project = await Project.get(project_id)
+                sprint_id = None
+                if project and project.sprints:
+                    for s in project.sprints:
+                        if s.title.lower() == sprint_title.lower():
+                            sprint_id = s.id
+                            break
+                if sprint_id:
+                    filters.append(Task.sprint_id == sprint_id)
+                else:
+                    filters.append(Task.sprint_id == sprint_title)
+                    
+            if status_val:
+                for enum_val in TaskStatus:
+                    if enum_val.value == status_val.upper():
+                        filters.append(Task.status == enum_val)
+                        break
+                        
+            tasks = await Task.find(*filters).to_list()
+            for t in tasks:
+                assignee_role = "UNKNOWN"
+                if t.assigned_to_id:
+                    user = await User.get(t.assigned_to_id)
+                    if user:
+                        assignee_role = user.role.value if hasattr(user.role, 'value') else str(user.role)
+                
+                content = f"Title: {t.title} | Description: {t.description or ''} | Status: {t.status.value} | Assignee: {assignee_role} | Priority: {t.priority.value}"
+                mongo_results.append({
+                    "entity_type": "TASK",
+                    "source_id": str(t.id),
+                    "project_id": project_id,
+                    "created_at": t.created_at.isoformat() if t.created_at else "",
+                    "content_snippet": content,
+                    "metadata": {
+                        "title": t.title,
+                        "sprint": sprint_title or t.sprint_id or "",
+                        "owner": assignee_role,
+                        "status": t.status.value if hasattr(t.status, 'value') else str(t.status),
+                        "code": t.priority.value,
+                        "citation_hash": f"cit_{uuid.uuid4().hex[:5]}"
+                    }
+                })
+                
+        if vector_results and mongo_results:
+            return self.hybrid_retriever._reciprocal_rank_fusion([vector_results, mongo_results])
+        elif vector_results:
+            return vector_results
+        else:
+            return mongo_results
+
+    async def _tool_read_document_chunk(self, project_id: str, args: dict) -> List[Dict[str, Any]]:
+        doc_id = args.get("doc_id")
+        if not doc_id or not isinstance(doc_id, str):
+            return []
+        chunk_idx = args.get("chunk_index")
+        if chunk_idx is None:
+            chunk_idx = 0
+        else:
+            try:
+                chunk_idx = int(chunk_idx)
+            except ValueError:
+                chunk_idx = 0
+                
+        # Fetch from LanceDB
+        try:
+            results = self.lancedb_manager.knowledge_table.search().where(f"project_id = '{project_id}' AND source_id = '{doc_id}'").to_list()
+            for r in results:
+                metadata_str = r.get("metadata", "{}")
+                try:
+                    metadata = json.loads(metadata_str)
+                except Exception:
+                    metadata = {}
+                    
+                if metadata.get("chunk_idx") == chunk_idx:
+                    if "citation_hash" not in metadata:
+                        metadata["citation_hash"] = f"cit_{uuid.uuid4().hex[:5]}"
+                    return [{
+                        "entity_type": r.get("entity_type", "DOCUMENT"),
+                        "source_id": r.get("source_id", ""),
+                        "project_id": r.get("project_id", ""),
+                        "created_at": r.get("created_at", ""),
+                        "content_snippet": r.get("content_snippet", ""),
+                        "metadata": metadata
+                    }]
+        except Exception as e:
+            agent_logger.error(f"Failed to fetch document chunk from LanceDB: {str(e)}")
+            
+        # Fallback to MongoDB
+        project = await Project.get(project_id)
+        if not project:
+            return []
+            
+        text = ""
+        filename = "document.txt"
+        section = "Content"
+        
+        if "requirements" in doc_id.lower():
+            text = project.requirements or ""
+            filename = "project_requirements.txt"
+            section = "Requirements"
+        elif "retro" in doc_id.lower():
+            retro_texts = [f"Retro for Sprint: {r.sprint_title or 'unknown'} | Went Well: {', '.join(r.went_well)} | Improvements: {', '.join(r.improvements)}" for r in project.retro_entries]
+            text = "\n\n".join(retro_texts)
+            filename = "project_retrospectives.txt"
+            section = "Retrospectives"
+        elif "sprint" in doc_id.lower():
+            sprint_texts = [f"Sprint Title: {s.title} | Goal: {s.goal or ''} | Status: {s.status}" for s in project.sprints]
+            text = "\n\n".join(sprint_texts)
+            filename = "project_sprints.txt"
+            section = "Sprints"
+            
+        if text:
+            from app.ai.core.splitter import RecursiveParagraphSplitter
+            splitter = RecursiveParagraphSplitter(chunk_size=256, chunk_overlap=32)
+            chunks = splitter.split_text(text)
+            if 0 <= chunk_idx < len(chunks):
+                return [{
+                    "entity_type": "DOCUMENT",
+                    "source_id": doc_id,
+                    "project_id": project_id,
+                    "created_at": project.created_at.isoformat() if project.created_at else "",
+                    "content_snippet": chunks[chunk_idx],
+                    "metadata": {
+                        "filename": filename,
+                        "chunk_idx": chunk_idx,
+                        "section": section,
+                        "citation_hash": f"cit_{uuid.uuid4().hex[:5]}"
+                    }
+                }]
+        return []
+
+    async def _tool_get_team_workload_metrics(self, project_id: str) -> List[Dict[str, Any]]:
+        tasks = await Task.find(Task.project_id == project_id).to_list()
+        
+        from collections import defaultdict
+        metrics_by_user = defaultdict(lambda: {"task_count": 0, "estimated_hours": 0.0})
+        
+        for t in tasks:
+            if t.status != TaskStatus.DONE:
+                user_key = t.assigned_to_id or "Unassigned"
+                metrics_by_user[user_key]["task_count"] += 1
+                metrics_by_user[user_key]["estimated_hours"] += t.estimated_hours
+                
+        items = []
+        for eng_id, stats in metrics_by_user.items():
+            name = "Unassigned"
+            email = "N/A"
+            role = "N/A"
+            
+            if eng_id != "Unassigned":
+                user = await User.get(eng_id)
+                if user:
+                    name = user.name
+                    email = user.email
+                    role = user.role.value if hasattr(user.role, 'value') else str(user.role)
+                    
+            active_task_count = stats["task_count"]
+            total_estimated_hours = stats["estimated_hours"]
+            
+            content = f"Engineer: {name} ({email}) | Role: {role} | Active Tasks: {active_task_count} | Total Estimated Hours (Points): {total_estimated_hours}"
+            items.append({
+                "entity_type": "METRIC",
+                "source_id": f"{project_id}_workload_metrics",
+                "project_id": project_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "content_snippet": content,
+                "metadata": {
+                    "engineer_id": eng_id,
+                    "name": name,
+                    "email": email,
+                    "role": role,
+                    "active_task_count": active_task_count,
+                    "total_estimated_hours": total_estimated_hours,
+                    "citation_hash": f"cit_{uuid.uuid4().hex[:5]}"
+                }
+            })
+        return items

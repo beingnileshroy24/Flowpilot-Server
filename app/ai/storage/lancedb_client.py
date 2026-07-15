@@ -2,7 +2,7 @@ import lancedb
 import pyarrow as pa
 import os
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class LanceDBManager:
     def __init__(self, db_path: str = "./.lancedb_store"):
@@ -104,7 +104,7 @@ class LanceDBManager:
         self.table.delete(f"task_id = '{escaped_task_id}'")
 
     # ================= Unified Knowledge Index Methods =================
-    def search_knowledge_similar(self, vector: List[float], project_id: str, limit: int = 5, entity_type: str = None) -> List[Dict[str, Any]]:
+    def search_knowledge_similar(self, vector: List[float], project_id: str, limit: int = 5, entity_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Search the unified knowledge base with metadata filters.
         """

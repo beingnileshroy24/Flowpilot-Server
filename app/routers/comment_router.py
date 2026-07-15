@@ -29,6 +29,10 @@ async def create_comment(payload: CommentCreateSchema, current_user: User = Depe
     )
     await comment.insert()
 
+    # Sync to LanceDB knowledge base
+    from app.services.sync_queue import push_to_sync_queue
+    push_to_sync_queue("COMMENT", str(comment.id), "create", task.project_id)
+
     # Create activity log entry
     activity = ActivityLog(
         task_id=payload.task_id,
@@ -66,5 +70,13 @@ async def delete_comment(comment_id: str, current_user: User = Depends(get_curre
             detail="You can only delete your own comments."
         )
 
+    from app.services.sync_queue import push_to_sync_queue
+    from app.models.task import Task
+    task = await Task.get(comment.task_id)
+    project_id = task.project_id if task else ""
+
     await comment.delete()
+    
+    # Sync deletion to LanceDB knowledge base
+    push_to_sync_queue("COMMENT", comment_id, "delete", project_id)
     return None

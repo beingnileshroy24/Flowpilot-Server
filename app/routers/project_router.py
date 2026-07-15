@@ -121,6 +121,11 @@ async def update_project(project_id: str, payload: ProjectUpdateSchema, current_
         setattr(project, field, value)
     
     await project.save()
+    
+    # Sync sprints and documents to LanceDB knowledge base
+    from app.services.sync_queue import push_to_sync_queue
+    push_to_sync_queue("SPRINT", project_id, "update", project_id)
+    
     return project
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

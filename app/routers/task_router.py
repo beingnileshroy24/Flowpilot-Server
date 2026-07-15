@@ -29,6 +29,14 @@ async def emit_sync_event(action_type: str, task_document: dict):
             else:
                 cleaned_doc[k] = v
         await sync_task_event(action_type, cleaned_doc)
+        
+        # Sync to unified LanceDB knowledge base
+        from app.services.sync_queue import push_to_sync_queue
+        task_id = cleaned_doc.get("id") or cleaned_doc.get("_id")
+        project_id = cleaned_doc.get("project_id")
+        if task_id and project_id:
+            push_to_sync_queue("TASK", str(task_id), action_type, str(project_id))
+            
     except Exception as e:
         logger.error(f"Failed to dispatch sync event {action_type} for task {task_document.get('id')}: {str(e)}")
 

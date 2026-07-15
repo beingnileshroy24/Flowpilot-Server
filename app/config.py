@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     API_V1_STR: str = "/api/v1"
     AI_ENGINE_URL: str = "http://127.0.0.1:8001"
+    MLX_MODEL: str = "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit"
+    USE_MOCK_LLM: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",

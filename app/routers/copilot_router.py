@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from app.auth.dependencies import get_current_user
 from app.models.user import User
-from app.ai.core.react_engine import react_engine
+from app.ai.core.agent_engine import AgentEngine
 
 router = APIRouter(
     prefix="/api/v1/copilot",
@@ -15,6 +15,8 @@ class CopilotQueryRequest(BaseModel):
     prompt: str
     contextScope: dict
 
+agent_engine = AgentEngine()
+
 @router.post("/query")
 async def copilot_query(
     payload: CopilotQueryRequest,
@@ -22,8 +24,7 @@ async def copilot_query(
 ):
     """
     Main endpoint for the Agentic Workspace Copilot.
-    Executes a ReAct loop over local vector and MongoDB indexes, fusses results,
-    and returns a Server-Sent Events (SSE) token stream.
+    Runs the agent orchestration process query loop.
     """
     if not payload.prompt.strip():
         raise HTTPException(
@@ -31,7 +32,8 @@ async def copilot_query(
             detail="Prompt cannot be empty."
         )
         
+    project_id = payload.contextScope.get("project_id", "")
     return StreamingResponse(
-        react_engine.execute_query(payload.prompt, payload.contextScope),
+        agent_engine.process_query(payload.prompt, project_id),
         media_type="text/event-stream"
     )

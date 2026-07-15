@@ -141,6 +141,17 @@ class AgentEngine:
         # Deduplicate and rank items
         fused_items = self._deduplicate_and_rank(all_retrieved_items)
         
+        # Yield sources metadata packet to client
+        sources_payload = []
+        for item in fused_items:
+            sources_payload.append({
+                "entity_type": item.get("entity_type"),
+                "source_id": item.get("source_id"),
+                "content_snippet": item.get("content_snippet"),
+                "metadata": item.get("metadata")
+            })
+        yield f"data: {json.dumps({'sources': sources_payload})}\n\n"
+        
         # 3. Validation: Enforce max context depth <= 4000 tokens
         pruned_context = self._assemble_and_prune_context(fused_items, max_tokens=4000)
         
@@ -194,6 +205,12 @@ class AgentEngine:
             key = (item.get("entity_type"), item.get("source_id"))
             if key not in seen:
                 seen.add(key)
+                metadata = item.get("metadata")
+                if metadata is None:
+                    metadata = {}
+                if not metadata.get("citation_hash"):
+                    metadata["citation_hash"] = f"cit_{uuid.uuid4().hex[:5]}"
+                item["metadata"] = metadata
                 deduped.append(item)
         return deduped
 

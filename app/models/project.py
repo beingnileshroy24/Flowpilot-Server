@@ -73,6 +73,8 @@ class Project(Document):
     prod_server: Optional[str] = None
     test_mongodb_url: Optional[str] = None
     prod_mongodb_url: Optional[str] = None
+    backend_secrets: Optional[str] = None
+    frontend_secrets: Optional[str] = None
     tech_stack: List[str] = []
     requirements: Optional[str] = ""
     milestones: List[Milestone] = []

@@ -71,6 +71,8 @@ class ProjectCreateSchema(BaseModel):
     prod_server: Optional[str] = None
     test_mongodb_url: Optional[str] = None
     prod_mongodb_url: Optional[str] = None
+    backend_secrets: Optional[str] = None
+    frontend_secrets: Optional[str] = None
     tech_stack: List[str] = Field(default_factory=list)
     requirements: Optional[str] = ""
     milestones: List[MilestoneSchema] = Field(default_factory=list)
@@ -92,6 +94,8 @@ class ProjectUpdateSchema(BaseModel):
     prod_server: Optional[str] = None
     test_mongodb_url: Optional[str] = None
     prod_mongodb_url: Optional[str] = None
+    backend_secrets: Optional[str] = None
+    frontend_secrets: Optional[str] = None
     tech_stack: Optional[List[str]] = None
     requirements: Optional[str] = None
     milestones: Optional[List[MilestoneSchema]] = None
@@ -115,6 +119,8 @@ class ProjectResponseSchema(BaseModel):
     prod_server: Optional[str] = None
     test_mongodb_url: Optional[str] = None
     prod_mongodb_url: Optional[str] = None
+    backend_secrets: Optional[str] = None
+    frontend_secrets: Optional[str] = None
     tech_stack: List[str]
     requirements: Optional[str] = ""
     milestones: List[MilestoneSchema]

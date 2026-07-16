@@ -14,7 +14,7 @@ from app.models.activity_log import ActivityLog
 from app.models.copilot_chat import CopilotChat
 
 async def init_db():
-    client = AsyncIOMotorClient(settings.MONGODB_URL)
+    client = AsyncIOMotorClient(settings.MONGODB_URL, tz_aware=True)
     await init_beanie(
         database=client[settings.DATABASE_NAME],  # type: ignore
         document_models=[

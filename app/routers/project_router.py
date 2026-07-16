@@ -46,6 +46,8 @@ async def create_project(payload: ProjectCreateSchema, current_user: User = Depe
         prod_server=payload.prod_server,
         test_mongodb_url=payload.test_mongodb_url,
         prod_mongodb_url=payload.prod_mongodb_url,
+        backend_secrets=payload.backend_secrets,
+        frontend_secrets=payload.frontend_secrets,
         owner_id=str(current_user.id)
     )
     await new_project.insert()

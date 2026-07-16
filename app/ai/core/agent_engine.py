@@ -49,13 +49,13 @@ class AgentEngine:
         # Fallback estimation
         return len(text.split()) + len(text) // 4
 
-    async def process_query(self, user_query: str, project_id: str, chat_id: Optional[str] = None) -> AsyncGenerator[str, None]:
+    async def process_query(self, user_query: str, project_id: str, chat_id: Optional[str] = None, user_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """
         Agentic Orchestration and Tools Routing Loop.
         Evaluates incoming queries, references history, executes tools, and streams response.
         """
         start_time = time.time()
-        agent_logger.info(f"Starting process_query for project_id={project_id}, query='{user_query}', chat_id={chat_id}")
+        agent_logger.info(f"Starting process_query for project_id={project_id}, query='{user_query}', chat_id={chat_id}, user_id={user_id}")
         
         # 1. Reference conversation history cache (DB-persisted if chat_id provided, otherwise local in-memory)
         conversation_log = ""
@@ -110,6 +110,8 @@ class AgentEngine:
                 elif action_name == "get_team_workload_metrics":
                     t_project_id = args.get("project_id") or project_id
                     retrieved_items = await self._tool_get_team_workload_metrics(t_project_id)
+                elif action_name == "modify_tasks":
+                    retrieved_items = await self._tool_modify_tasks(project_id, args, user_id=user_id)
             except Exception as e:
                 error_msg = str(e)
                 agent_logger.error(f"Tool execution failed: {error_msg}")
@@ -124,7 +126,7 @@ class AgentEngine:
         # (backlog tool already blends MongoDB + vector internally, so a second broad search
         # would contaminate context with DOCUMENTs and COMMENTs)
         routed_tool_names = [a.get("name") for a in planned_actions]
-        if "search_backlog" not in routed_tool_names:
+        if "search_backlog" not in routed_tool_names and "modify_tasks" not in routed_tool_names:
             try:
                 secondary_items = self.hybrid_retriever.search_hybrid(
                     query=user_query,
@@ -261,6 +263,111 @@ class AgentEngine:
         """
         q = query.lower()
         actions = []
+
+        # --- Task Mutation / Modification check ---
+        mutation_keywords = ["change", "update", "set", "mark", "move", "assign", "transition"]
+        is_mutation = any(kw in q for kw in mutation_keywords)
+        question_words = ["what", "show", "list", "who", "which", "how", "find", "search", "get"]
+        starts_with_question = any(q.startswith(qw) for qw in question_words)
+
+        if is_mutation and not starts_with_question:
+            target_status = None
+            target_priority = None
+            target_assignee = None
+
+            # Detect target status
+            if any(kw in q for kw in ["to done", "as done", "status done", "move to done", "change to done", "mark done", "mark as done", "completed", "complete"]):
+                target_status = "DONE"
+            elif any(kw in q for kw in ["to in progress", "to in_progress", "as in progress", "status in progress", "mark as in progress", "mark in progress", "move to in progress", "wip"]):
+                target_status = "IN_PROGRESS"
+            elif any(kw in q for kw in ["to in review", "to in_review", "as in review", "status in review", "mark as in review", "mark in review", "move to in review"]):
+                target_status = "IN_REVIEW"
+            elif any(kw in q for kw in ["to todo", "to to do", "as todo", "status todo", "mark as todo", "mark todo", "move to todo"]):
+                target_status = "TODO"
+            else:
+                if "done" in q or "completed" in q or "complete" in q:
+                    target_status = "DONE"
+                elif "in progress" in q or "in_progress" in q:
+                    target_status = "IN_PROGRESS"
+                elif "in review" in q or "in_review" in q:
+                    target_status = "IN_REVIEW"
+                elif "todo" in q or "to do" in q:
+                    target_status = "TODO"
+
+            # Detect target priority
+            if "critical" in q:
+                target_priority = "CRITICAL"
+            elif "high" in q:
+                target_priority = "HIGH"
+            elif "medium" in q:
+                target_priority = "MEDIUM"
+            elif "low" in q:
+                target_priority = "LOW"
+
+            # Detect target assignee
+            if "assign" in q:
+                assign_match = re.search(r"to\s+([a-zA-Z0-9_\-]+)", query, re.IGNORECASE)
+                if assign_match:
+                    possible_assignee = assign_match.group(1)
+                    if possible_assignee.upper() not in ["TODO", "DONE", "IN_PROGRESS", "IN_REVIEW", "IN-PROGRESS", "IN-REVIEW", "REVIEW", "LOW", "MEDIUM", "HIGH", "CRITICAL"]:
+                        target_assignee = possible_assignee
+                if not target_assignee:
+                    assign_match_2 = re.search(r"assign\s+([a-zA-Z0-9_\-]+)", query, re.IGNORECASE)
+                    if assign_match_2:
+                        possible_assignee = assign_match_2.group(1)
+                        if possible_assignee.lower() not in ["task", "ticket", "issue"]:
+                            target_assignee = possible_assignee
+
+            # Detect task title or ID
+            task_title_or_id = None
+            is_bulk_update = any(phrase in q for phrase in ["all task", "all the task", "every task", "all ticket", "all issue"])
+            
+            if not is_bulk_update:
+                quote_match = re.search(r"(?:task|ticket|issue)\s+['\"]([^'\"]+)['\"]", query, re.IGNORECASE)
+                if quote_match:
+                    task_title_or_id = quote_match.group(1)
+                else:
+                    unquote_match = re.search(r"(?:task|ticket|issue)\s+(.+?)\s+(?:to|as|status|priority)", query, re.IGNORECASE)
+                    if unquote_match:
+                        potential_title = unquote_match.group(1).strip()
+                        if potential_title.lower() not in ["from", "all"]:
+                            task_title_or_id = potential_title
+
+            # Detect filters for bulk update
+            filter_status = None
+            try:
+                # Find indexes to distinguish filter status from target status
+                if "todo" in q and target_status != "TODO":
+                    filter_status = "TODO"
+                elif "to do" in q and target_status != "TODO":
+                    filter_status = "TODO"
+                elif "in progress" in q and target_status != "IN_PROGRESS":
+                    filter_status = "IN_PROGRESS"
+                elif "in review" in q and target_status != "IN_REVIEW":
+                    filter_status = "IN_REVIEW"
+            except Exception:
+                pass
+
+            filter_sprint = None
+            sprint_match = re.search(r"sprint\s+(\w+)", q)
+            if sprint_match:
+                filter_sprint = f"Sprint {sprint_match.group(1).capitalize()}"
+
+            if target_status or target_priority or target_assignee:
+                actions.append({
+                    "name": "modify_tasks",
+                    "args": {
+                        "target_status": target_status,
+                        "target_priority": target_priority,
+                        "target_assignee": target_assignee,
+                        "task_title_or_id": task_title_or_id,
+                        "filter_status": filter_status,
+                        "filter_sprint": filter_sprint,
+                        "original_query": query
+                    },
+                    "thought": "Detected task modification request. Routing to modify_tasks tool."
+                })
+                return actions
 
         # --- Document / Requirements queries ---
         doc_keywords = ["requirements", "requirement", "prd", "scope", "spec", "specification",
@@ -643,3 +750,182 @@ class AgentEngine:
                 }
             })
         return items
+
+    async def _tool_modify_tasks(self, project_id: str, args: dict, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        from app.models.task import Task, TaskStatus, TaskPriority
+        from app.models.project import Project
+        from app.models.user import User
+        from app.models.activity_log import ActivityLog
+        from app.routers.task_router import emit_sync_event
+        from beanie import PydanticObjectId
+
+        target_status = args.get("target_status")
+        target_priority = args.get("target_priority")
+        target_assignee = args.get("target_assignee")
+        task_title_or_id = args.get("task_title_or_id")
+        filter_status = args.get("filter_status")
+        filter_sprint = args.get("filter_sprint")
+
+        # 1. Resolve assignee if target_assignee is provided
+        assignee_id = None
+        assignee_name = None
+        if target_assignee:
+            if target_assignee.lower() == "unassigned":
+                assignee_id = None
+                assignee_name = "Unassigned"
+            else:
+                user = await User.find_one({"name": {"$regex": target_assignee, "$options": "i"}})
+                if not user:
+                    user = await User.find_one({"email": {"$regex": target_assignee, "$options": "i"}})
+                if user:
+                    assignee_id = str(user.id)
+                    assignee_name = user.name
+                else:
+                    agent_logger.warning(f"Assignee target '{target_assignee}' not found in database.")
+                    return [{
+                        "entity_type": "MUTATION_ERROR",
+                        "source_id": "error",
+                        "content_snippet": f"Could not find a user matching the assignee name '{target_assignee}'. No tasks were updated.",
+                        "metadata": {"title": "Error"}
+                    }]
+
+        # 2. Get sprint ID if filter_sprint is provided
+        sprint_id = None
+        if filter_sprint:
+            project = await Project.get(project_id)
+            if project and project.sprints:
+                for s in project.sprints:
+                    if s.title.lower() == filter_sprint.lower():
+                        sprint_id = s.id
+                        break
+            if not sprint_id:
+                sprint_id = filter_sprint
+
+        # 3. Build MongoDB filters
+        filters: List[Any] = [Task.project_id == project_id]
+
+        if task_title_or_id:
+            if PydanticObjectId.is_valid(task_title_or_id):
+                filters.append(Task.id == PydanticObjectId(task_title_or_id))
+            else:
+                filters.append({"title": {"$regex": task_title_or_id, "$options": "i"}})
+        else:
+            original_q = args.get("original_query", "").lower()
+            if not filter_status and not filter_sprint and "all" not in original_q and "every" not in original_q:
+                return [{
+                    "entity_type": "MUTATION_ERROR",
+                    "source_id": "error",
+                    "content_snippet": "Please specify which task you want to modify (e.g. by title, ID, or say 'all tasks').",
+                    "metadata": {"title": "Error"}
+                }]
+            if filter_status:
+                for enum_val in TaskStatus:
+                    if enum_val.value == filter_status.upper():
+                        filters.append(Task.status == enum_val)
+                        break
+            if sprint_id:
+                filters.append(Task.sprint_id == sprint_id)
+
+        tasks = await Task.find(*filters).to_list()
+        if not tasks and task_title_or_id:
+            try:
+                closest_results = self.hybrid_retriever.search_hybrid(
+                    query=task_title_or_id,
+                    project_id=project_id,
+                    limit=1,
+                    entity_type="TASK",
+                    similarity_threshold=0.35
+                )
+                if closest_results:
+                    closest_task_id = closest_results[0].get("source_id")
+                    if closest_task_id:
+                        task = await Task.get(closest_task_id)
+                        if task:
+                            tasks = [task]
+            except Exception as e:
+                agent_logger.error(f"Fallback hybrid search failed for modify task: {str(e)}")
+
+        if not tasks:
+            return [{
+                "entity_type": "MUTATION_RESULT",
+                "source_id": "no_tasks",
+                "content_snippet": "No matching tasks were found to modify.",
+                "metadata": {"title": "No Tasks Modified"}
+            }]
+
+        operator_name = "Copilot"
+        if user_id:
+            try:
+                operator = await User.get(user_id)
+                if operator:
+                    operator_name = operator.name
+            except Exception:
+                pass
+
+        results = []
+        for task in tasks:
+            old_status = task.status.value if hasattr(task.status, 'value') else str(task.status)
+            old_priority = task.priority.value if hasattr(task.priority, 'value') else str(task.priority)
+            
+            changes = []
+            if target_status:
+                for enum_val in TaskStatus:
+                    if enum_val.value == target_status.upper():
+                        task.status = enum_val
+                        changes.append(f"status changed from {old_status} to {enum_val.value}")
+                        break
+
+            if target_priority:
+                for enum_val in TaskPriority:
+                    if enum_val.value == target_priority.upper():
+                        task.priority = enum_val
+                        changes.append(f"priority changed from {old_priority} to {enum_val.value}")
+                        break
+
+            if target_assignee:
+                task.assigned_to_id = assignee_id
+                changes.append(f"assigned to {assignee_name or 'Unassigned'}")
+
+            if changes:
+                task.updated_at = datetime.now(timezone.utc)
+                await task.save()
+
+                detail_str = f"Updated task '{task.title}': " + ", ".join(changes)
+                activity = ActivityLog(
+                    task_id=str(task.id),
+                    project_id=task.project_id,
+                    user_id=user_id or "copilot",
+                    user_name=operator_name,
+                    action="task_updated",
+                    detail=detail_str
+                )
+                await activity.insert()
+
+                await emit_sync_event("update", task.model_dump())
+
+                results.append({
+                    "entity_type": "TASK",
+                    "source_id": str(task.id),
+                    "content_snippet": f"Successfully updated task '{task.title}' (ID: {task.id}): " + ", ".join(changes),
+                    "metadata": {
+                        "title": task.title,
+                        "status": task.status.value if hasattr(task.status, 'value') else str(task.status),
+                        "priority": task.priority.value if hasattr(task.priority, 'value') else str(task.priority),
+                        "owner": assignee_name or (await self._get_user_name(task.assigned_to_id)),
+                        "citation_hash": f"cit_{uuid.uuid4().hex[:5]}"
+                    }
+                })
+
+        return results
+
+    async def _get_user_name(self, user_id: Optional[str]) -> str:
+        if not user_id:
+            return "Unassigned"
+        try:
+            from app.models.user import User
+            user = await User.get(user_id)
+            if user:
+                return user.name
+        except Exception:
+            pass
+        return "Unknown"

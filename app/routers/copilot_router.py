@@ -43,7 +43,7 @@ async def copilot_query(
         
     project_id = payload.contextScope.get("project_id", "")
     return StreamingResponse(
-        agent_engine.process_query(payload.prompt, project_id),
+        agent_engine.process_query(payload.prompt, project_id, user_id=str(current_user.id)),
         media_type="text/event-stream"
     )
 
@@ -136,6 +136,6 @@ async def copilot_chat_query(
         )
         
     return StreamingResponse(
-        agent_engine.process_query(payload.prompt, chat.project_id, chat_id=str(chat.id)),
+        agent_engine.process_query(payload.prompt, chat.project_id, chat_id=str(chat.id), user_id=str(current_user.id)),
         media_type="text/event-stream"
     )

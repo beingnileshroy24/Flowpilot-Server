@@ -105,3 +105,94 @@ async def test_agent_engine_process_query_flow():
             assert "Starting process_query" in log_content
             assert "Executed tool pattern" in log_content
             assert "Total process_query timeframe" in log_content
+
+def test_route_query_mutations():
+    engine = AgentEngine()
+    
+    # Test case 1: status change
+    actions = engine._route_query("mark task 'Login UI' as DONE", "proj_123")
+    assert len(actions) == 1
+    assert actions[0]["name"] == "modify_tasks"
+    assert actions[0]["args"]["target_status"] == "DONE"
+    assert actions[0]["args"]["task_title_or_id"] == "Login UI"
+
+    # Test case 2: priority change
+    actions = engine._route_query("set priority of task 'SSO' to high", "proj_123")
+    assert len(actions) == 1
+    assert actions[0]["name"] == "modify_tasks"
+    assert actions[0]["args"]["target_priority"] == "HIGH"
+    assert actions[0]["args"]["task_title_or_id"] == "SSO"
+
+    # Test case 3: assign task
+    actions = engine._route_query("assign task 'Update docs' to roy", "proj_123")
+    assert len(actions) == 1
+    assert actions[0]["name"] == "modify_tasks"
+    assert actions[0]["args"]["target_assignee"] == "roy"
+    assert actions[0]["args"]["task_title_or_id"] == "Update docs"
+
+    # Test case 4: bulk update
+    actions = engine._route_query("transition tasks in sprint 8 from todo to done", "proj_123")
+    assert len(actions) == 1
+    assert actions[0]["name"] == "modify_tasks"
+    assert actions[0]["args"]["target_status"] == "DONE"
+    assert actions[0]["args"]["filter_status"] == "TODO"
+    assert actions[0]["args"]["filter_sprint"] == "Sprint 8"
+
+    # Test case 5: query that looks like mutation but starts with question word should NOT trigger mutation
+    actions_q = engine._route_query("what tasks were changed to done in sprint 8", "proj_123")
+    assert all(a["name"] != "modify_tasks" for a in actions_q)
+
+@pytest.mark.anyio
+async def test_tool_modify_tasks_execution(client):
+    engine = AgentEngine()
+    
+    class MockStatus:
+        def __init__(self, value):
+            self.value = value
+    class MockPriority:
+        def __init__(self, value):
+            self.value = value
+
+    mock_task = MagicMock()
+    mock_task.id = "task_id_123"
+    mock_task.project_id = "proj_123"
+    mock_task.title = "Test Task"
+    mock_task.status = MockStatus("TODO")
+    mock_task.priority = MockPriority("MEDIUM")
+    mock_task.assigned_to_id = None
+    mock_task.model_dump = MagicMock(return_value={"id": "task_id_123", "title": "Test Task"})
+    mock_task.save = AsyncMock()
+
+    mock_user = MagicMock()
+    mock_user.id = "user_id_roy"
+    mock_user.name = "roy"
+    
+    mock_task_find = MagicMock()
+    mock_task_find.to_list = AsyncMock(return_value=[mock_task])
+    
+    with patch("app.models.task.Task.find", return_value=mock_task_find), \
+         patch("app.models.user.User.find_one", AsyncMock(return_value=mock_user)), \
+         patch("app.models.user.User.get", AsyncMock(return_value=mock_user)), \
+         patch("app.models.activity_log.ActivityLog.insert", AsyncMock()) as mock_activity_insert, \
+         patch("app.routers.task_router.emit_sync_event", AsyncMock()) as mock_emit_sync:
+         
+        args = {
+            "target_status": "DONE",
+            "target_priority": "HIGH",
+            "target_assignee": "roy",
+            "task_title_or_id": "Test Task"
+        }
+        
+        results = await engine._tool_modify_tasks("proj_123", args, user_id="operator_id")
+        
+        assert len(results) == 1
+        assert results[0]["entity_type"] == "TASK"
+        assert results[0]["source_id"] == "task_id_123"
+        assert "status changed from" in results[0]["content_snippet"]
+        assert "priority changed from" in results[0]["content_snippet"]
+        assert "assigned to" in results[0]["content_snippet"]
+        
+        mock_task.save.assert_called_once()
+        mock_activity_insert.assert_called_once()
+        mock_emit_sync.assert_called_once_with("update", {"id": "task_id_123", "title": "Test Task"})
+

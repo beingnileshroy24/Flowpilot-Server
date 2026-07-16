@@ -402,3 +402,72 @@ async def delete_task(
     
     background_tasks.add_task(emit_sync_event, "delete", task_dict)
 
+
+from pydantic import BaseModel
+
+class BulkStatusUpdateSchema(BaseModel):
+    task_ids: List[str]
+    status: TaskStatus
+
+class BulkDeleteSchema(BaseModel):
+    task_ids: List[str]
+
+
+@router.post("/bulk-status", status_code=status.HTTP_200_OK)
+async def bulk_update_task_status(
+    payload: BulkStatusUpdateSchema,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user)
+):
+    """Allows updating status of multiple tasks in bulk."""
+    updated_tasks = []
+    for task_id in payload.task_ids:
+        task = await Task.get(task_id)
+        if not task:
+            continue
+        old_status = task.status.value
+        task.status = payload.status
+        task.updated_at = datetime.now(timezone.utc)
+        await task.save()
+        
+        # Activity log
+        activity = ActivityLog(
+            task_id=str(task.id),
+            project_id=task.project_id,
+            user_id=str(current_user.id),
+            user_name=current_user.name,
+            action="status_change",
+            detail=f"Changed status from {old_status} to {payload.status.value} in bulk on '{task.title}'"
+        )
+        await activity.insert()
+        background_tasks.add_task(emit_sync_event, "update", task.model_dump())
+        updated_tasks.append(str(task.id))
+    return {"message": f"Successfully updated {len(updated_tasks)} tasks to {payload.status.value}", "updated_task_ids": updated_tasks}
+
+
+@router.post("/bulk-delete", status_code=status.HTTP_200_OK)
+async def bulk_delete_tasks(
+    payload: BulkDeleteSchema,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user)
+):
+    """Allows deleting multiple tasks in bulk. Only Managers and Admins can delete tasks."""
+    if current_user.role not in [UserRole.MANAGER, UserRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers or administrators have permission to bulk delete tasks."
+        )
+        
+    deleted_count = 0
+    for task_id in payload.task_ids:
+        task = await Task.get(task_id)
+        if not task:
+            continue
+        task_dict = task.model_dump()
+        await task.delete()
+        background_tasks.add_task(emit_sync_event, "delete", task_dict)
+        deleted_count += 1
+        
+    return {"message": f"Successfully deleted {deleted_count} tasks", "deleted_count": deleted_count}
+
+

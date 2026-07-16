@@ -7,6 +7,7 @@ from app.models.task import Task
 from app.schemas.project_schema import ProjectCreateSchema, ProjectUpdateSchema, ProjectResponseSchema
 from app.auth.dependencies import get_current_user
 from beanie import PydanticObjectId
+from app.models.activity_log import ActivityLog
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
@@ -67,6 +68,16 @@ async def create_project(payload: ProjectCreateSchema, current_user: User = Depe
             dev_map = {str(d.id): d.name for d in devs}
             dev_names = [dev_map.get(d_id, "Unknown") for d_id in new_project.developer_ids]
     schema.developer_names = dev_names
+    
+    activity = ActivityLog(
+        project_id=str(new_project.id),
+        user_id=str(current_user.id),
+        user_name=current_user.name,
+        action="project_created",
+        detail=f"Created project '{new_project.name}'"
+    )
+    await activity.insert()
+    
     return schema
 
 @router.get("/", response_model=List[ProjectResponseSchema])
@@ -199,6 +210,16 @@ async def update_project(project_id: str, payload: ProjectUpdateSchema, current_
             dev_names = [dev_map.get(d_id, "Unknown") for d_id in project.developer_ids]
     schema.developer_names = dev_names
     
+    fields_changed = ", ".join(update_data.keys())
+    activity = ActivityLog(
+        project_id=str(project.id),
+        user_id=str(current_user.id),
+        user_name=current_user.name,
+        action="project_updated",
+        detail=f"Updated project '{project.name}' fields: {fields_changed}"
+    )
+    await activity.insert()
+    
     # Sync sprints and documents to LanceDB knowledge base
     from app.services.sync_queue import push_to_sync_queue
     push_to_sync_queue("SPRINT", project_id, "update", project_id)
@@ -223,6 +244,15 @@ async def delete_project(project_id: str, background_tasks: BackgroundTasks, cur
 
     # Delete all tasks associated with this project
     await Task.find(Task.project_id == project_id).delete()
+    
+    activity = ActivityLog(
+        project_id=project_id,
+        user_id=str(current_user.id),
+        user_name=current_user.name,
+        action="project_deleted",
+        detail=f"Deleted project '{project.name}' and all associated tasks."
+    )
+    await activity.insert()
     
     # Delete project
     await project.delete()

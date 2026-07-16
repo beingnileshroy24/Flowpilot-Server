@@ -400,6 +400,16 @@ async def delete_task(
     task_dict = task.model_dump()
     await task.delete()
     
+    activity = ActivityLog(
+        task_id=task_id,
+        project_id=task.project_id,
+        user_id=str(current_user.id),
+        user_name=current_user.name,
+        action="task_deleted",
+        detail=f"Deleted task '{task.title}'"
+    )
+    await activity.insert()
+    
     background_tasks.add_task(emit_sync_event, "delete", task_dict)
 
 
@@ -465,6 +475,17 @@ async def bulk_delete_tasks(
             continue
         task_dict = task.model_dump()
         await task.delete()
+        
+        activity = ActivityLog(
+            task_id=task_id,
+            project_id=task.project_id,
+            user_id=str(current_user.id),
+            user_name=current_user.name,
+            action="task_deleted",
+            detail=f"Deleted task '{task.title}' in bulk"
+        )
+        await activity.insert()
+        
         background_tasks.add_task(emit_sync_event, "delete", task_dict)
         deleted_count += 1
         

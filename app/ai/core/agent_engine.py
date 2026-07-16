@@ -17,6 +17,7 @@ from app.ai.prompts.nwbe_templates import REACT_PLANNING_TEMPLATE, GROUNDED_SYNT
 from app.models.task import Task, TaskStatus, TaskPriority
 from app.models.project import Project
 from app.models.user import User, UserRole
+from app.models.copilot_chat import CopilotChat, ChatMessage
 
 # Ensure logs directory exists
 os.makedirs("logs", exist_ok=True)
@@ -48,22 +49,38 @@ class AgentEngine:
         # Fallback estimation
         return len(text.split()) + len(text) // 4
 
-    async def process_query(self, user_query: str, project_id: str) -> AsyncGenerator[str, None]:
+    async def process_query(self, user_query: str, project_id: str, chat_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """
         Agentic Orchestration and Tools Routing Loop.
         Evaluates incoming queries, references history, executes tools, and streams response.
         """
         start_time = time.time()
-        agent_logger.info(f"Starting process_query for project_id={project_id}, query='{user_query}'")
+        agent_logger.info(f"Starting process_query for project_id={project_id}, query='{user_query}', chat_id={chat_id}")
         
-        # 1. Reference conversation history cache
-        history = self.conversation_history[project_id]
+        # 1. Reference conversation history cache (DB-persisted if chat_id provided, otherwise local in-memory)
         conversation_log = ""
-        if history:
-            conversation_log += "=== Prior Conversation History ===\n"
-            for idx, turn in enumerate(history):
-                conversation_log += f"Turn {idx + 1} - User: {turn['query']}\nTurn {idx + 1} - Agent Response: {turn['response']}\n"
-            conversation_log += "==================================\n\n"
+        chat_document = None
+        if chat_id:
+            try:
+                chat_document = await CopilotChat.get(chat_id)
+                if chat_document and chat_document.messages:
+                    conversation_log += "=== Prior Conversation History ===\n"
+                    turn_idx = 1
+                    for msg in chat_document.messages:
+                        sender_label = "User" if msg.sender == "user" else "Agent Response"
+                        conversation_log += f"Turn {turn_idx} - {sender_label}: {msg.text}\n"
+                        if msg.sender == "bot":
+                            turn_idx += 1
+                    conversation_log += "==================================\n\n"
+            except Exception as e:
+                agent_logger.error(f"Failed to fetch copilot chat history from DB: {str(e)}")
+        else:
+            history = self.conversation_history[project_id]
+            if history:
+                conversation_log += "=== Prior Conversation History ===\n"
+                for idx, turn in enumerate(history):
+                    conversation_log += f"Turn {idx + 1} - User: {turn['query']}\nTurn {idx + 1} - Agent Response: {turn['response']}\n"
+                conversation_log += "==================================\n\n"
             
         all_retrieved_items = []
         
@@ -78,7 +95,7 @@ class AgentEngine:
             args = tool_action.get("args", {})
             thought_msg = tool_action.get("thought", f"Executing {action_name}...")
             
-            yield f"data: {json.dumps({'thought': f'[Step {step_idx + 1}] {thought_msg}'})}\n\n"
+            yield f"data: {json.dumps({'thought': f'[Step {step_idx + 1}] {thought_msg}\n'})}\n\n"
             agent_logger.info(f"Executed tool pattern: {action_name}({args})")
             
             retrieved_items = []
@@ -103,20 +120,25 @@ class AgentEngine:
             if not error_msg:
                 all_retrieved_items.extend(retrieved_items)
 
-        # Secondary semantic search blending via HybridRetriever
-        try:
-            secondary_items = self.hybrid_retriever.search_hybrid(
-                query=user_query,
-                project_id=project_id,
-                limit=5
-            )
-            for item in secondary_items:
-                if "similarity" in item:
-                    distance = 2.0 * (1.0 - item["similarity"])
-                    agent_logger.info(f"Vector distance score: {distance:.4f} (similarity: {item['similarity']:.4f})")
-            all_retrieved_items.extend(secondary_items)
-        except Exception as e:
-            agent_logger.error(f"Secondary hybrid search failed: {str(e)}") 
+        # Secondary semantic search — only run if the primary tool was NOT search_backlog
+        # (backlog tool already blends MongoDB + vector internally, so a second broad search
+        # would contaminate context with DOCUMENTs and COMMENTs)
+        routed_tool_names = [a.get("name") for a in planned_actions]
+        if "search_backlog" not in routed_tool_names:
+            try:
+                secondary_items = self.hybrid_retriever.search_hybrid(
+                    query=user_query,
+                    project_id=project_id,
+                    limit=5,
+                    similarity_threshold=0.45
+                )
+                for item in secondary_items:
+                    if "similarity" in item:
+                        distance = 2.0 * (1.0 - item["similarity"])
+                        agent_logger.info(f"Vector distance score: {distance:.4f} (similarity: {item['similarity']:.4f})")
+                all_retrieved_items.extend(secondary_items)
+            except Exception as e:
+                agent_logger.error(f"Secondary hybrid search failed: {str(e)}")
 
         # Deduplicate and rank items
         fused_items = self._deduplicate_and_rank(all_retrieved_items)
@@ -133,7 +155,7 @@ class AgentEngine:
         yield f"data: {json.dumps({'sources': sources_payload})}\n\n"
         
         # 3. Assemble and prune context
-        pruned_context = self._assemble_and_prune_context(fused_items, max_tokens=4000)
+        pruned_context = self._assemble_and_prune_context(fused_items, max_tokens=6000)
         
         # 4. Stream response
         # When no data was retrieved, skip the LLM entirely and reply directly.
@@ -143,10 +165,21 @@ class AgentEngine:
             for token in no_data_msg.split():
                 yield f"data: {json.dumps({'chunk': token + ' '})}\n\n"
                 await asyncio.sleep(0.01)
-            self.conversation_history[project_id].append({
-                "query": user_query,
-                "response": no_data_msg
-            })
+            if chat_document:
+                try:
+                    user_msg = ChatMessage(sender="user", text=user_query)
+                    bot_msg = ChatMessage(sender="bot", text=no_data_msg)
+                    chat_document.messages.append(user_msg)
+                    chat_document.messages.append(bot_msg)
+                    chat_document.updated_at = datetime.now(timezone.utc)
+                    await chat_document.save()
+                except Exception as e:
+                    agent_logger.error(f"Failed to persist early-exit chat message to MongoDB: {str(e)}")
+            else:
+                self.conversation_history[project_id].append({
+                    "query": user_query,
+                    "response": no_data_msg
+                })
             total_duration = time.time() - start_time
             agent_logger.info(f"Total process_query timeframe: {total_duration:.4f}s (no-data fast path)")
             yield "data: [DONE]\n\n"
@@ -156,10 +189,14 @@ class AgentEngine:
             context=pruned_context,
             query=user_query
         )
+        # Add a newline spacer in the thoughts panel before streaming synthesis thoughts
+        yield f"data: {json.dumps({'thought': '\n'})}\n\n"
         
         full_response = ""
+        accumulated_thoughts = ""
         async for chunk_type, token_text in llm_manager.stream_generate(synthesis_prompt):
             if chunk_type == "thought":
+                accumulated_thoughts += token_text
                 yield f"data: {json.dumps({'thought': token_text})}\n\n"
             else:
                 full_response += token_text
@@ -185,12 +222,30 @@ class AgentEngine:
                 yield f"data: {json.dumps({'chunk': token + ' '})}\n\n"
                 await asyncio.sleep(0.01)
             
-        # Cache only the clean answer text
-        self.conversation_history[project_id].append({
-            "query": user_query,
-            "response": full_response.strip()
-        })
-        
+        # Cache and/or persist conversation messages
+        cleaned_response = full_response.strip()
+        if chat_document:
+            try:
+                # Add user prompt and bot response
+                user_msg = ChatMessage(sender="user", text=user_query)
+                bot_msg = ChatMessage(
+                    sender="bot",
+                    text=cleaned_response,
+                    thoughts=accumulated_thoughts,
+                    sources=sources_payload
+                )
+                chat_document.messages.append(user_msg)
+                chat_document.messages.append(bot_msg)
+                chat_document.updated_at = datetime.now(timezone.utc)
+                await chat_document.save()
+            except Exception as e:
+                agent_logger.error(f"Failed to persist chat messages to MongoDB: {str(e)}")
+        else:
+            self.conversation_history[project_id].append({
+                "query": user_query,
+                "response": cleaned_response
+            })
+            
         total_duration = time.time() - start_time
         agent_logger.info(f"Total process_query timeframe: {total_duration:.4f}s")
         yield "data: [DONE]\n\n"
@@ -356,68 +411,110 @@ class AgentEngine:
         return "".join(context_blocks)
 
     async def _tool_search_backlog(self, project_id: str, args: dict) -> List[Dict[str, Any]]:
+        """
+        Primary backlog search tool.
+        Strategy: MongoDB is ALWAYS the authoritative source for task counts and lists.
+        Vector/keyword hybrid search provides relevance ranking signal.
+        Results are blended via Reciprocal Rank Fusion (RRF).
+        """
         query = args.get("query")
         status_val = args.get("status")
         sprint_title = args.get("sprint")
-        
+
+        # --- Step 1: Vector + keyword hybrid search (TASK-scoped, low threshold for inclusivity) ---
         vector_results = []
-        mongo_results = []
-        
         if query:
-            vector_results = self.hybrid_retriever.search_hybrid(query, project_id, limit=5)
-            
-        if status_val or sprint_title:
-            filters: List[Any] = [Task.project_id == project_id]
-            if sprint_title:
-                project = await Project.get(project_id)
-                sprint_id = None
-                if project and project.sprints:
-                    for s in project.sprints:
-                        if s.title.lower() == sprint_title.lower():
-                            sprint_id = s.id
-                            break
-                if sprint_id:
-                    filters.append(Task.sprint_id == sprint_id)
-                else:
-                    filters.append(Task.sprint_id == sprint_title)
-                    
-            if status_val:
-                for enum_val in TaskStatus:
-                    if enum_val.value == status_val.upper():
-                        filters.append(Task.status == enum_val)
+            try:
+                vector_results = self.hybrid_retriever.search_hybrid(
+                    query=query,
+                    project_id=project_id,
+                    limit=20,
+                    entity_type="TASK",
+                    similarity_threshold=0.35
+                )
+                agent_logger.info(f"Vector/keyword search returned {len(vector_results)} TASK results for query='{query}'")
+            except Exception as e:
+                agent_logger.error(f"Hybrid search error in _tool_search_backlog: {str(e)}")
+
+        # --- Step 2: MongoDB direct fetch (always authoritative for task list and counts) ---
+        # Build filters: always start with project_id scope
+        filters: List[Any] = [Task.project_id == project_id]
+
+        if sprint_title:
+            project = await Project.get(project_id)
+            sprint_id = None
+            if project and project.sprints:
+                for s in project.sprints:
+                    if s.title.lower() == sprint_title.lower():
+                        sprint_id = s.id
                         break
-                        
-            tasks = await Task.find(*filters).to_list()
-            for t in tasks:
-                assignee_role = "UNKNOWN"
-                if t.assigned_to_id:
+            if sprint_id:
+                filters.append(Task.sprint_id == sprint_id)
+            else:
+                filters.append(Task.sprint_id == sprint_title)
+
+        if status_val:
+            for enum_val in TaskStatus:
+                if enum_val.value == status_val.upper():
+                    filters.append(Task.status == enum_val)
+                    break
+
+        mongo_tasks = await Task.find(*filters).to_list()
+        agent_logger.info(f"MongoDB fetch returned {len(mongo_tasks)} tasks for project={project_id}, status={status_val}, sprint={sprint_title}")
+
+        mongo_results = []
+        for t in mongo_tasks:
+            assignee_name = "Unassigned"
+            if t.assigned_to_id:
+                try:
                     user = await User.get(t.assigned_to_id)
                     if user:
-                        assignee_role = user.role.value if hasattr(user.role, 'value') else str(user.role)
-                
-                content = f"Title: {t.title} | Description: {t.description or ''} | Status: {t.status.value} | Assignee: {assignee_role} | Priority: {t.priority.value}"
-                mongo_results.append({
-                    "entity_type": "TASK",
-                    "source_id": str(t.id),
-                    "project_id": project_id,
-                    "created_at": t.created_at.isoformat() if t.created_at else "",
-                    "content_snippet": content,
-                    "metadata": {
-                        "title": t.title,
-                        "sprint": sprint_title or t.sprint_id or "",
-                        "owner": assignee_role,
-                        "status": t.status.value if hasattr(t.status, 'value') else str(t.status),
-                        "code": t.priority.value,
-                        "citation_hash": f"cit_{uuid.uuid4().hex[:5]}"
-                    }
-                })
-                
+                        assignee_name = user.name if hasattr(user, 'name') and user.name else (
+                            user.role.value if hasattr(user.role, 'value') else str(user.role)
+                        )
+                except Exception:
+                    pass
+
+            status_str = t.status.value if hasattr(t.status, 'value') else str(t.status)
+            priority_str = t.priority.value if hasattr(t.priority, 'value') else str(t.priority)
+            sprint_str = t.sprint_id or ""
+            description_str = (t.description or "")[:200]  # cap to avoid token bloat
+
+            content = (
+                f"Title: {t.title} | "
+                f"Status: {status_str} | "
+                f"Priority: {priority_str} | "
+                f"Assignee: {assignee_name} | "
+                f"Sprint: {sprint_str} | "
+                f"Description: {description_str}"
+            )
+            mongo_results.append({
+                "entity_type": "TASK",
+                "source_id": str(t.id),
+                "project_id": project_id,
+                "created_at": t.created_at.isoformat() if t.created_at else "",
+                "content_snippet": content,
+                "metadata": {
+                    "title": t.title,
+                    "status": status_str,
+                    "priority": priority_str,
+                    "sprint": sprint_title or sprint_str,
+                    "owner": assignee_name,
+                    "code": priority_str,
+                    "citation_hash": f"cit_{uuid.uuid4().hex[:5]}"
+                }
+            })
+
+        # --- Step 3: Blend MongoDB results with vector results via RRF ---
+        # MongoDB is always used; vector adds relevance-based re-ranking on top.
         if vector_results and mongo_results:
-            return self.hybrid_retriever._reciprocal_rank_fusion([vector_results, mongo_results])
-        elif vector_results:
-            return vector_results
-        else:
+            blended = self.hybrid_retriever._reciprocal_rank_fusion([mongo_results, vector_results])
+            agent_logger.info(f"RRF blended result count: {len(blended)}")
+            return blended
+        elif mongo_results:
             return mongo_results
+        else:
+            return vector_results
 
     async def _tool_read_document_chunk(self, project_id: str, args: dict) -> List[Dict[str, Any]]:
         doc_id = args.get("doc_id")

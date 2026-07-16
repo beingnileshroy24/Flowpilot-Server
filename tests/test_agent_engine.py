@@ -56,9 +56,9 @@ async def test_agent_engine_process_query_flow():
     mock_generate = MagicMock(return_value="<think>Planning to search backlog</think>\nAction: search_backlog(query=\"sprint 8\")")
     
     async def mock_stream(prompt, max_tokens=2048):
-        yield "<think>Fusing task details</think>"
-        yield "Response chunk 1"
-        yield " Response chunk 2"
+        yield "thought", "Fusing task details"
+        yield "chunk", "Response chunk 1"
+        yield "chunk", " Response chunk 2"
 
     # Mock tools
     mock_search_backlog = AsyncMock(return_value=[

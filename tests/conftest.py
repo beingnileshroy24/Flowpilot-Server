@@ -10,9 +10,9 @@ from app.main import app
 from app.models.user import User
 from app.models.task import Task
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def client():
-    """Session fixture that runs the app lifespan (connecting to MongoDB) and yields the test client."""
+    """Function fixture that runs the app lifespan (connecting to MongoDB) and yields the test client."""
     with TestClient(app) as test_client:
         yield test_client
 
@@ -27,4 +27,5 @@ def clean_database():
     db["users"].delete_many({})
     db["tasks"].delete_many({})
     db["projects"].delete_many({})
+    db["copilot_chats"].delete_many({})
     client.close()

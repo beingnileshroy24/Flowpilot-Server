@@ -34,21 +34,30 @@ class HybridRetriever:
         limit: int = 5,
         entity_type: Optional[str] = None,
         k: int = 60,
-        similarity_threshold: float = 0.72
+        similarity_threshold: float = 0.45
     ) -> List[Dict[str, Any]]:
         """
         Blends keyword search (exact overlap match) and vector lookup on LanceDB knowledge table.
-        Applies a strict cosine similarity threshold of 0.72 to vector results.
-        Uses Reciprocal Rank Fusion (RRF) to merge ranks.
+        Applies a cosine similarity threshold to vector results (default 0.45 — inclusive for
+        natural-language task queries). Uses Reciprocal Rank Fusion (RRF) to merge ranks.
+
+        Args:
+            query: Natural language search query.
+            project_id: Scope all results to this project.
+            limit: Max number of results to return after fusion.
+            entity_type: If set, restrict results to this entity type (e.g. "TASK", "DOCUMENT").
+            k: RRF constant — higher values flatten rank differences.
+            similarity_threshold: Minimum cosine similarity for vector results to be included.
+                                   Lower values (0.35–0.50) are better for general backlog queries.
         """
-        logger.info(f"Hybrid search: query='{query}', project_id='{project_id}', entity_type='{entity_type}'")
+        logger.info(f"Hybrid search: query='{query}', project_id='{project_id}', entity_type='{entity_type}', threshold={similarity_threshold}")
         
         # 1. Vector Search
         vector = self.embedder.compute_embedding(query, "")
         vector_results = self.lancedb_manager.search_knowledge_similar(
             vector=vector,
             project_id=project_id,
-            limit=limit * 2,
+            limit=limit * 3,
             entity_type=entity_type
         )
         
@@ -57,7 +66,7 @@ class HybridRetriever:
             distance = r.get('_distance', 2.0)
             similarity = 1.0 - (distance / 2.0)
             if similarity < similarity_threshold:
-                logger.info(f"Skipping vector result due to similarity {similarity:.4f} < {similarity_threshold}")
+                logger.info(f"Skipping vector result (similarity {similarity:.4f} < threshold {similarity_threshold})")
                 continue
             
             metadata_str = r.get("metadata", "{}")
@@ -79,7 +88,7 @@ class HybridRetriever:
                 "similarity": similarity
             })
 
-        # 2. Keyword Search
+        # 2. Keyword Search — respect entity_type filter if provided
         filter_expr = f"project_id = '{project_id}'"
         if entity_type:
             filter_expr += f" AND entity_type = '{entity_type}'"
@@ -118,7 +127,7 @@ class HybridRetriever:
                 
         # Sort keyword items by score descending
         scored_keyword_items.sort(key=lambda x: x[0], reverse=True)
-        ranked_keyword_items = [item for _, item in scored_keyword_items[:limit * 2]]
+        ranked_keyword_items = [item for _, item in scored_keyword_items[:limit * 3]]
 
         # 3. Reciprocal Rank Fusion
         fused_items = self._reciprocal_rank_fusion(
@@ -173,3 +182,4 @@ class HybridRetriever:
             sorted_items.append(item)
             
         return sorted_items
+

@@ -101,7 +101,10 @@ def test_copilot_query_endpoint(client: TestClient):
     assert len(data_lines) > 0
 
 @pytest.mark.anyio
-async def test_react_engine_tools_direct(client: TestClient):
+async def test_react_engine_tools_direct():
+    from app.database import init_db
+    await init_db()
+    
     from app.models.project import Project
     from app.models.task import Task, TaskType, TaskStatus
     from app.models.user import User, UserRole, UserStatus

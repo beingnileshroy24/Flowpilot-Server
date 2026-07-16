@@ -39,37 +39,106 @@ class LLMManager:
             import mlx_lm
             self.load_model()
             if self.model and self.tokenizer:
-                response = mlx_lm.generate(self.model, self.tokenizer, prompt, max_tokens=max_tokens)
+                try:
+                    messages = [{"role": "user", "content": prompt}]
+                    formatted_prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                except Exception as e:
+                    logger.error(f"Failed to apply chat template: {str(e)}")
+                    formatted_prompt = prompt
+                response = mlx_lm.generate(self.model, self.tokenizer, formatted_prompt, max_tokens=max_tokens)
                 return response
         except Exception as e:
             logger.error(f"Error in MLX generate: {str(e)}")
             
         return self._generate_mock(prompt)
 
-    async def stream_generate(self, prompt: str, max_tokens: int = 2048) -> AsyncGenerator[str, None]:
+    async def stream_generate(self, prompt: str, max_tokens: int = 2048) -> AsyncGenerator[tuple, None]:
         """
         Streaming generator for grounding and synthesis phase.
+        Yields (chunk_type, text) tuples where chunk_type is either:
+          - "thought": tokens inside <think>...</think> reasoning block
+          - "chunk": tokens that form the final answer
         """
         if settings.USE_MOCK_LLM or self.model is None:
-            async for chunk in self._stream_mock_synthesis(prompt):
-                yield chunk
+            async for item in self._stream_mock_synthesis(prompt):
+                yield item
             return
 
         try:
             import mlx_lm
             self.load_model()
             if self.model and self.tokenizer:
-                # stream_generate runs synchronously in generator; yield control periodically
-                for response in mlx_lm.stream_generate(self.model, self.tokenizer, prompt, max_tokens=max_tokens):
+                try:
+                    messages = [{"role": "user", "content": prompt}]
+                    formatted_prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                except Exception as e:
+                    logger.error(f"Failed to apply chat template: {str(e)}")
+                    formatted_prompt = prompt
+
+                # DeepSeek-R1 chat templates append '<think>\n' to the formatted
+                # prompt when add_generation_prompt=True. This means the model's
+                # very first token is already INSIDE the think block — no <think>
+                # tag is ever generated. We must start in_think=True in that case,
+                # otherwise all reasoning tokens are wrongly emitted as "chunk".
+                in_think = formatted_prompt.rstrip().endswith("<think>")
+                think_buffer = ""
+
+                for response in mlx_lm.stream_generate(self.model, self.tokenizer, formatted_prompt, max_tokens=max_tokens):
                     token_text = response if isinstance(response, str) else getattr(response, "text", str(response))
-                    yield token_text
+
+                    # Accumulate a small look-ahead buffer to detect <think>/<think> across token boundaries
+                    think_buffer += token_text
+
+                    # Detect opening <think> tag
+                    while think_buffer:
+                        if not in_think:
+                            think_start = think_buffer.find("<think>")
+                            if think_start != -1:
+                                # Emit any text before <think> as answer chunk
+                                before = think_buffer[:think_start]
+                                if before:
+                                    yield ("chunk", before)
+                                in_think = True
+                                think_buffer = think_buffer[think_start + len("<think>"):]
+                            else:
+                                # No <think> found - check if partial match at tail
+                                safe_len = max(0, len(think_buffer) - len("<think>"))
+                                if safe_len > 0:
+                                    emit = think_buffer[:safe_len]
+                                    yield ("chunk", emit)
+                                    think_buffer = think_buffer[safe_len:]
+                                break
+                        else:
+                            think_end = think_buffer.find("</think>")
+                            if think_end != -1:
+                                # Emit everything up to </think> as thought
+                                thought_text = think_buffer[:think_end]
+                                if thought_text:
+                                    yield ("thought", thought_text)
+                                in_think = False
+                                think_buffer = think_buffer[think_end + len("</think>"):]
+                            else:
+                                # Still inside <think> - safely emit up to end minus partial tag
+                                safe_len = max(0, len(think_buffer) - len("</think>"))
+                                if safe_len > 0:
+                                    emit = think_buffer[:safe_len]
+                                    yield ("thought", emit)
+                                    think_buffer = think_buffer[safe_len:]
+                                break
+
                     await asyncio.sleep(0)
+
+                # Flush remaining buffer
+                if think_buffer:
+                    chunk_type = "thought" if in_think else "chunk"
+                    yield (chunk_type, think_buffer)
+
                 return
         except Exception as e:
             logger.error(f"Error in MLX stream_generate: {str(e)}")
 
-        async for chunk in self._stream_mock_synthesis(prompt):
-            yield chunk
+        async for item in self._stream_mock_synthesis(prompt):
+            yield item
 
     def _generate_mock(self, prompt: str) -> str:
         """
@@ -117,21 +186,20 @@ class LLMManager:
             "Action: search_backlog(query=\"description_query\")"
         )
 
-    async def _stream_mock_synthesis(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def _stream_mock_synthesis(self, prompt: str) -> AsyncGenerator[tuple, None]:
         """
         Streams a high-quality mock response representing the grounded synthesis phase with citations.
+        Yields (chunk_type, text) tuples matching the signature of stream_generate().
         """
         # Parse what data was retrieved in the prompt to make it realistic
         prompt_lower = prompt.lower()
         
         # Prepare the response text
-        think_section = (
-            "<think>\n"
+        think_text = (
             "Analyzing the query and the retrieved database documents.\n"
             "Retrieved database records show active items with status BLOCKED.\n"
             "Fusing task details and comments.\n"
             "Formulating output with Markdown structure and citation references.\n"
-            "</think>\n\n"
         )
         
         response_text = ""
@@ -154,14 +222,14 @@ class LLMManager:
                 "- Active milestones and codebases are currently healthy [cit_e5f6a].\n\n"
             )
             
-        # Stream the thought section
-        for i in range(0, len(think_section), 10):
-            yield think_section[i:i+10]
+        # Stream the thought section as "thought" typed chunks
+        for i in range(0, len(think_text), 10):
+            yield ("thought", think_text[i:i+10])
             await asyncio.sleep(0.02)
             
-        # Stream the response section
+        # Stream the response section as "chunk" typed chunks
         for i in range(0, len(response_text), 15):
-            yield response_text[i:i+15]
+            yield ("chunk", response_text[i:i+15])
             await asyncio.sleep(0.01)
 
 llm_manager = LLMManager()

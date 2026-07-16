@@ -2,6 +2,7 @@ import re
 import json
 import logging
 import time
+import asyncio
 import uuid
 import os
 from collections import defaultdict
@@ -66,31 +67,18 @@ class AgentEngine:
             
         all_retrieved_items = []
         
-        # 2. ReAct planning loop
-        for iteration in range(3):
-            planning_prompt = REACT_PLANNING_TEMPLATE.format(
-                query=user_query,
-                context_scope=json.dumps({"project_id": project_id}),
-                conversation_log=conversation_log or "No actions taken yet."
-            )
-            
-            logger_response_time = time.time()
-            llm_response = llm_manager.generate(planning_prompt, max_tokens=512)
-            
-            think_content = ""
-            think_match = re.search(r"<think>(.*?)</think>", llm_response, re.DOTALL)
-            if think_match:
-                think_content = think_match.group(1).strip()
-                yield f"data: {json.dumps({'thought': f'[Step {iteration + 1}] ' + think_content})}\n\n"
-                
-            tool_action = self._parse_tool_action(llm_response)
+        # 2. Tool routing — deterministic keyword classifier replaces the LLM planning call.
+        #    The real DeepSeek-R1 model does NOT reliably follow the strict Action: format,
+        #    leading to wrong tools ("search_backlog(query='test query')") for every query type.
+        #    Keyword routing is fast, correct, and doesn't require any LLM inference.
+        planned_actions = self._route_query(user_query, project_id)
+        
+        for step_idx, tool_action in enumerate(planned_actions):
             action_name = tool_action.get("name")
             args = tool_action.get("args", {})
+            thought_msg = tool_action.get("thought", f"Executing {action_name}...")
             
-            if action_name == "finalize" or not action_name:
-                break
-                
-            # Log executed tool pattern
+            yield f"data: {json.dumps({'thought': f'[Step {step_idx + 1}] {thought_msg}'})}\n\n"
             agent_logger.info(f"Executed tool pattern: {action_name}({args})")
             
             retrieved_items = []
@@ -105,8 +93,6 @@ class AgentEngine:
                 elif action_name == "get_team_workload_metrics":
                     t_project_id = args.get("project_id") or project_id
                     retrieved_items = await self._tool_get_team_workload_metrics(t_project_id)
-                else:
-                    error_msg = f"Unknown tool: {action_name}"
             except Exception as e:
                 error_msg = str(e)
                 agent_logger.error(f"Tool execution failed: {error_msg}")
@@ -114,29 +100,23 @@ class AgentEngine:
             tool_duration = time.time() - tool_start_time
             agent_logger.info(f"Tool execution timeframe: {tool_duration:.4f}s")
             
-            if error_msg:
-                observation = f"Error executing tool: {error_msg}"
-            else:
-                observation = f"Executed {action_name} successfully. Gathered {len(retrieved_items)} items."
+            if not error_msg:
                 all_retrieved_items.extend(retrieved_items)
-                
-            conversation_log += f"Thought: {think_content}\nAction: {action_name}({args})\nObservation: {observation}\n"
 
-        # Secondary search blending via HybridRetriever
+        # Secondary semantic search blending via HybridRetriever
         try:
             secondary_items = self.hybrid_retriever.search_hybrid(
                 query=user_query,
                 project_id=project_id,
                 limit=5
             )
-            # Log similarity distance scores
             for item in secondary_items:
                 if "similarity" in item:
                     distance = 2.0 * (1.0 - item["similarity"])
                     agent_logger.info(f"Vector distance score: {distance:.4f} (similarity: {item['similarity']:.4f})")
             all_retrieved_items.extend(secondary_items)
         except Exception as e:
-            agent_logger.error(f"Secondary hybrid search failed: {str(e)}")
+            agent_logger.error(f"Secondary hybrid search failed: {str(e)}") 
 
         # Deduplicate and rank items
         fused_items = self._deduplicate_and_rank(all_retrieved_items)
@@ -152,30 +132,155 @@ class AgentEngine:
             })
         yield f"data: {json.dumps({'sources': sources_payload})}\n\n"
         
-        # 3. Validation: Enforce max context depth <= 4000 tokens
+        # 3. Assemble and prune context
         pruned_context = self._assemble_and_prune_context(fused_items, max_tokens=4000)
         
         # 4. Stream response
+        # When no data was retrieved, skip the LLM entirely and reply directly.
+        # This avoids hallucination and is much faster.
+        if not pruned_context.strip():
+            no_data_msg = "No relevant data was found in the workspace database for this query. Please ensure workspace data has been synced, or try rephrasing your question."
+            for token in no_data_msg.split():
+                yield f"data: {json.dumps({'chunk': token + ' '})}\n\n"
+                await asyncio.sleep(0.01)
+            self.conversation_history[project_id].append({
+                "query": user_query,
+                "response": no_data_msg
+            })
+            total_duration = time.time() - start_time
+            agent_logger.info(f"Total process_query timeframe: {total_duration:.4f}s (no-data fast path)")
+            yield "data: [DONE]\n\n"
+            return
+
         synthesis_prompt = GROUNDED_SYNTHESIS_TEMPLATE.format(
             context=pruned_context,
             query=user_query
         )
         
         full_response = ""
-        async for chunk in llm_manager.stream_generate(synthesis_prompt):
-            full_response += chunk
-            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+        async for chunk_type, token_text in llm_manager.stream_generate(synthesis_prompt):
+            if chunk_type == "thought":
+                yield f"data: {json.dumps({'thought': token_text})}\n\n"
+            else:
+                full_response += token_text
+                yield f"data: {json.dumps({'chunk': token_text})}\n\n"
+
+        # Fallback: If the LLM produced no answer tokens (put everything in <think>),
+        # stream a concise summary directly from the retrieved context.
+        if not full_response.strip():
+            agent_logger.warning("LLM synthesis produced no chunk tokens. Falling back to context summary.")
+            summary_lines = ["Based on the retrieved workspace data:\n\n"]
+            for item in fused_items[:4]:
+                snippet = item.get("content_snippet", "").strip()
+                meta = item.get("metadata", {})
+                citation = meta.get("citation_hash", "")
+                if snippet:
+                    line = f"- {snippet[:200]}"
+                    if citation:
+                        line += f" [{citation}]"
+                    summary_lines.append(line + "\n")
+            fallback_text = "".join(summary_lines)
+            full_response = fallback_text
+            for token in fallback_text.split():
+                yield f"data: {json.dumps({'chunk': token + ' '})}\n\n"
+                await asyncio.sleep(0.01)
             
-        # Parse final response to cache without thought tags
-        clean_response = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
+        # Cache only the clean answer text
         self.conversation_history[project_id].append({
             "query": user_query,
-            "response": clean_response
+            "response": full_response.strip()
         })
         
         total_duration = time.time() - start_time
         agent_logger.info(f"Total process_query timeframe: {total_duration:.4f}s")
         yield "data: [DONE]\n\n"
+
+    def _route_query(self, query: str, project_id: str) -> list:
+        """
+        Deterministic keyword-based tool router.
+        Returns an ordered list of tool action dicts to execute.
+        
+        This replaces the LLM-based planning loop which was unreliable:
+        the real DeepSeek-R1 model doesn't follow the strict Action: format
+        and was generating wrong actions (e.g. search_backlog(query='test query')).
+        """
+        q = query.lower()
+        actions = []
+
+        # --- Document / Requirements queries ---
+        doc_keywords = ["requirements", "requirement", "prd", "scope", "spec", "specification",
+                        "document", "documentation", "feature", "user story"]
+        retro_keywords = ["retrospective", "retro", "went well", "improvement"]
+        sprint_doc_keywords = ["sprint goal", "sprint scope", "sprint document"]
+
+        if any(kw in q for kw in retro_keywords):
+            actions.append({
+                "name": "read_document_chunk",
+                "args": {"doc_id": "retro", "chunk_index": 0},
+                "thought": "Query relates to retrospectives. Retrieving retrospective document chunks from the workspace database."
+            })
+        elif any(kw in q for kw in sprint_doc_keywords):
+            actions.append({
+                "name": "read_document_chunk",
+                "args": {"doc_id": "sprint", "chunk_index": 0},
+                "thought": "Query relates to sprint scope or goals. Retrieving sprint document data."
+            })
+        elif any(kw in q for kw in doc_keywords):
+            actions.append({
+                "name": "read_document_chunk",
+                "args": {"doc_id": "requirements", "chunk_index": 0},
+                "thought": "Query relates to project requirements or documentation. Retrieving requirement document chunks."
+            })
+
+        # --- Workload / Team metrics queries ---
+        workload_keywords = ["workload", "metrics", "capacity", "engineer", "team load",
+                             "who is working", "who has", "assignee", "assigned to", "task count"]
+        if any(kw in q for kw in workload_keywords):
+            actions.append({
+                "name": "get_team_workload_metrics",
+                "args": {"project_id": project_id},
+                "thought": "Query relates to team workload or task distribution. Aggregating task metrics per team member."
+            })
+
+        # --- Backlog / Task search queries ---
+        # Build smart args from query keywords
+        backlog_keywords = ["blocker", "blocked", "task", "issue", "ticket", "sprint",
+                            "progress", "status", "in progress", "done", "todo", "backlog",
+                            "priority", "high priority", "overdue", "deadline"]
+        needs_backlog = any(kw in q for kw in backlog_keywords) or not actions
+
+        if needs_backlog:
+            status_val = None
+            sprint_val = None
+
+            # Detect status filters
+            if "block" in q:
+                status_val = "BLOCKED"
+            elif "in progress" in q or "in_progress" in q or "wip" in q:
+                status_val = "IN_PROGRESS"
+            elif "done" in q or "complete" in q or "finish" in q:
+                status_val = "DONE"
+            elif "todo" in q or "not started" in q:
+                status_val = "TODO"
+
+            # Detect sprint name (e.g. "Sprint 8", "sprint 2")
+            sprint_match = re.search(r"sprint\s+(\w+)", q)
+            if sprint_match:
+                sprint_val = f"Sprint {sprint_match.group(1).capitalize()}"
+
+            search_args: Dict[str, Any] = {"query": query}
+            if status_val:
+                search_args["status"] = status_val
+            if sprint_val:
+                search_args["sprint"] = sprint_val
+
+            actions.append({
+                "name": "search_backlog",
+                "args": search_args,
+                "thought": f"Searching workspace backlog for relevant tasks{' with status ' + status_val if status_val else ''}{' in ' + sprint_val if sprint_val else ''}."
+            })
+
+        return actions
 
     def _parse_tool_action(self, response_text: str) -> dict:
         action_match = re.search(r"Action:\s*(\w+)\((.*)\)", response_text)

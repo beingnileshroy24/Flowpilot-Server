@@ -115,15 +115,21 @@ class ReActEngine:
         pruned_context = self._prune_context(fused_items, max_chars=16000)
 
         # --- Phase 4: Grounded Synthesis & Streaming ---
+        # If nothing was retrieved, pass an explicit NO_DATA marker so the model
+        # gives a clean one-sentence reply rather than hallucinating context.
+        context_block = pruned_context if pruned_context.strip() else "NO_DATA — No relevant workspace data was found for this query."
         synthesis_prompt = GROUNDED_SYNTHESIS_TEMPLATE.format(
-            context=pruned_context,
+            context=context_block,
             query=query
         )
 
         logger.info("[REACT ENGINE] Starting synthesis streaming generation...")
-        async for chunk in llm_manager.stream_generate(synthesis_prompt):
-            # Stream the final tokens back in SSE format
-            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+        async for chunk_type, token_text in llm_manager.stream_generate(synthesis_prompt):
+            # Route thought tokens and answer tokens to separate SSE event types
+            if chunk_type == "thought":
+                yield f"data: {json.dumps({'thought': token_text})}\n\n"
+            else:
+                yield f"data: {json.dumps({'chunk': token_text})}\n\n"
 
         # Signal completion
         yield "data: [DONE]\n\n"

@@ -130,5 +130,7 @@ class ProjectResponseSchema(BaseModel):
     decisions: List[DecisionEntrySchema]
     retro_entries: List[RetroEntrySchema]
     created_at: datetime
+    owner_name: Optional[str] = None
+    developer_names: Optional[List[str]] = None
 
     model_config = ConfigDict(from_attributes=True)

@@ -292,3 +292,69 @@ def test_task_mutations_and_sync_dispatcher(mock_sync, client: TestClient):
     get_res = client.get(f"/api/v1/tasks/{task_id}", headers=headers)
     assert get_res.status_code == 404
 
+
+def test_project_names_population(client: TestClient):
+    # Setup - Register manager and developer users
+    client.post("/api/v1/auth/signup", json={
+        "name": "Manager Charlie",
+        "email": "charlie@example.com",
+        "password": "charliepassword",
+        "role": "MANAGER"
+    })
+    
+    dev_response = client.post("/api/v1/auth/signup", json={
+        "name": "Developer Dave",
+        "email": "dave@example.com",
+        "password": "davepassword",
+        "role": "DEVELOPER"
+    })
+    dev_id = dev_response.json()["id"]
+
+    # Log in as Manager Charlie
+    login_response = client.post("/api/v1/auth/login", data={
+        "username": "charlie@example.com",
+        "password": "charliepassword"
+    })
+    token = login_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1. Create a project
+    project_payload = {
+        "name": "Project Charlie",
+        "description": "Charlie's test project",
+        "developer_ids": [dev_id],
+        "lead_developer_id": dev_id
+    }
+    project_response = client.post("/api/v1/projects/", json=project_payload, headers=headers)
+    assert project_response.status_code == 201
+    project_data = project_response.json()
+    assert project_data["owner_name"] == "Manager Charlie"
+    assert project_data["developer_names"] == ["Developer Dave"]
+    project_id = project_data["id"]
+
+    # 2. Get project by ID and verify names are populated
+    get_response = client.get(f"/api/v1/projects/{project_id}", headers=headers)
+    assert get_response.status_code == 200
+    get_data = get_response.json()
+    assert get_data["owner_name"] == "Manager Charlie"
+    assert get_data["developer_names"] == ["Developer Dave"]
+
+    # 3. List projects and verify names are populated
+    list_response = client.get("/api/v1/projects/", headers=headers)
+    assert list_response.status_code == 200
+    list_data = list_response.json()
+    project_in_list = next(p for p in list_data if p["id"] == project_id)
+    assert project_in_list["owner_name"] == "Manager Charlie"
+    assert project_in_list["developer_names"] == ["Developer Dave"]
+
+    # 4. Update project and verify names are populated
+    update_payload = {
+        "description": "Updated description"
+    }
+    update_response = client.patch(f"/api/v1/projects/{project_id}", json=update_payload, headers=headers)
+    assert update_response.status_code == 200
+    update_data = update_response.json()
+    assert update_data["owner_name"] == "Manager Charlie"
+    assert update_data["developer_names"] == ["Developer Dave"]
+
+

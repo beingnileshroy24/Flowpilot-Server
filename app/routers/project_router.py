@@ -6,6 +6,7 @@ from app.services.sync_service import cleanup_project_vectors
 from app.models.task import Task
 from app.schemas.project_schema import ProjectCreateSchema, ProjectUpdateSchema, ProjectResponseSchema
 from app.auth.dependencies import get_current_user
+from beanie import PydanticObjectId
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
@@ -51,13 +52,52 @@ async def create_project(payload: ProjectCreateSchema, current_user: User = Depe
         owner_id=str(current_user.id)
     )
     await new_project.insert()
-    return new_project
+    schema = ProjectResponseSchema.model_validate(new_project)
+    schema.owner_name = current_user.name
+    dev_names = []
+    if new_project.developer_ids:
+        valid_dev_ids = []
+        for d in new_project.developer_ids:
+            try:
+                valid_dev_ids.append(PydanticObjectId(d))
+            except Exception:
+                pass
+        if valid_dev_ids:
+            devs = await User.find({"_id": {"$in": valid_dev_ids}}).to_list()
+            dev_map = {str(d.id): d.name for d in devs}
+            dev_names = [dev_map.get(d_id, "Unknown") for d_id in new_project.developer_ids]
+    schema.developer_names = dev_names
+    return schema
 
 @router.get("/", response_model=List[ProjectResponseSchema])
 async def list_projects(current_user: User = Depends(get_current_user)):
     """Lists all projects in the workspace."""
     projects = await Project.find_all().to_list()
-    return projects
+    user_ids = set()
+    for p in projects:
+        if p.owner_id:
+            user_ids.add(p.owner_id)
+        for d in p.developer_ids:
+            user_ids.add(d)
+            
+    valid_ids = []
+    for uid in user_ids:
+        try:
+            valid_ids.append(PydanticObjectId(uid))
+        except Exception:
+            pass
+            
+    users = await User.find({"_id": {"$in": valid_ids}}).to_list()
+    user_map = {str(u.id): u.name for u in users}
+    
+    res = []
+    for p in projects:
+        schema = ProjectResponseSchema.model_validate(p)
+        schema.owner_name = user_map.get(p.owner_id, "Unknown")
+        schema.developer_names = [user_map.get(d_id, "Unknown") for d_id in p.developer_ids]
+        res.append(schema)
+        
+    return res
 
 @router.get("/{project_id}", response_model=ProjectResponseSchema)
 async def get_project(project_id: str, current_user: User = Depends(get_current_user)):
@@ -68,7 +108,24 @@ async def get_project(project_id: str, current_user: User = Depends(get_current_
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found"
         )
-    return project
+    schema = ProjectResponseSchema.model_validate(project)
+    owner = await User.get(project.owner_id)
+    schema.owner_name = owner.name if owner else "Unknown"
+    
+    dev_names = []
+    if project.developer_ids:
+        valid_dev_ids = []
+        for d in project.developer_ids:
+            try:
+                valid_dev_ids.append(PydanticObjectId(d))
+            except Exception:
+                pass
+        if valid_dev_ids:
+            devs = await User.find({"_id": {"$in": valid_dev_ids}}).to_list()
+            dev_map = {str(d.id): d.name for d in devs}
+            dev_names = [dev_map.get(d_id, "Unknown") for d_id in project.developer_ids]
+    schema.developer_names = dev_names
+    return schema
 
 @router.patch("/{project_id}", response_model=ProjectResponseSchema)
 async def update_project(project_id: str, payload: ProjectUpdateSchema, current_user: User = Depends(get_current_user)):
@@ -124,11 +181,29 @@ async def update_project(project_id: str, payload: ProjectUpdateSchema, current_
     
     await project.save()
     
+    schema = ProjectResponseSchema.model_validate(project)
+    owner = await User.get(project.owner_id)
+    schema.owner_name = owner.name if owner else "Unknown"
+    
+    dev_names = []
+    if project.developer_ids:
+        valid_dev_ids = []
+        for d in project.developer_ids:
+            try:
+                valid_dev_ids.append(PydanticObjectId(d))
+            except Exception:
+                pass
+        if valid_dev_ids:
+            devs = await User.find({"_id": {"$in": valid_dev_ids}}).to_list()
+            dev_map = {str(d.id): d.name for d in devs}
+            dev_names = [dev_map.get(d_id, "Unknown") for d_id in project.developer_ids]
+    schema.developer_names = dev_names
+    
     # Sync sprints and documents to LanceDB knowledge base
     from app.services.sync_queue import push_to_sync_queue
     push_to_sync_queue("SPRINT", project_id, "update", project_id)
     
-    return project
+    return schema
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(project_id: str, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):

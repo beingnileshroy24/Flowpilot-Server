@@ -61,7 +61,7 @@ async def rebuild_vector_index():
             lancedb_manager.db.drop_table(lancedb_manager.table_name)
         except Exception:
             pass # Table might not exist yet
-        lancedb_manager._get_or_create_table()
+        lancedb_manager._get_or_create_tables()
         
         # Iteratively fetch and reconstruct vectors
         async for task in Task.find_all():

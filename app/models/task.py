@@ -37,6 +37,8 @@ class Task(Document):
     assigned_to_id: Optional[str] = None  # Direct string representation of User ID
     estimated_hours: float = 0.0
     actual_hours: float = 0.0
+    dependency_ids: List[str] = []
+    blocked_hours: float = 0.0
     tags: List[str] = []
     attachment_url: Optional[str] = None
     due_date: Optional[str] = None

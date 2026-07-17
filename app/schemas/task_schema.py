@@ -21,6 +21,8 @@ class TaskCreateSchema(BaseModel):
     priority: TaskPriority = Field(TaskPriority.MEDIUM)
     assigned_to_id: Optional[str] = Field(None, description="User ID of the assignee")
     estimated_hours: float = Field(0.0, ge=0.0)
+    dependency_ids: List[str] = Field(default_factory=list)
+    blocked_hours: float = Field(0.0, ge=0.0)
     tags: List[str] = Field(default_factory=list)
     attachment_url: Optional[str] = None
     due_date: Optional[str] = None
@@ -39,6 +41,8 @@ class TaskUpdateSchema(BaseModel):
     assigned_to_id: Optional[str] = None
     estimated_hours: Optional[float] = Field(None, ge=0.0)
     actual_hours: Optional[float] = Field(None, ge=0.0)
+    dependency_ids: Optional[List[str]] = None
+    blocked_hours: Optional[float] = Field(None, ge=0.0)
     tags: Optional[List[str]] = None
     attachment_url: Optional[str] = None
     due_date: Optional[str] = None
@@ -59,6 +63,8 @@ class TaskResponseSchema(BaseModel):
     assigned_to: Optional[UserResponseSchema] = None
     estimated_hours: float
     actual_hours: float
+    dependency_ids: List[str]
+    blocked_hours: float
     tags: List[str]
     attachment_url: Optional[str] = None
     due_date: Optional[str] = None

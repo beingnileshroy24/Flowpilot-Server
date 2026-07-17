@@ -12,6 +12,8 @@ from app.models.notification import Notification
 from app.models.comment import Comment
 from app.models.activity_log import ActivityLog
 from app.models.copilot_chat import CopilotChat
+from app.models.sprint_prediction import SprintPrediction
+from app.models.project_health import ProjectHealth
 
 async def init_db():
     client = AsyncIOMotorClient(settings.MONGODB_URL, tz_aware=True)
@@ -25,5 +27,7 @@ async def init_db():
             Comment,
             ActivityLog,
             CopilotChat,
+            SprintPrediction,
+            ProjectHealth,
         ]
     )

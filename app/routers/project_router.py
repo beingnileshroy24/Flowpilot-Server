@@ -11,6 +11,11 @@ from app.models.activity_log import ActivityLog
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
+def to_project_response_schema(project: Project) -> ProjectResponseSchema:
+    project_dict = project.model_dump()
+    project_dict["id"] = project.id
+    return ProjectResponseSchema.model_validate(project_dict)
+
 @router.post("/", response_model=ProjectResponseSchema, status_code=status.HTTP_201_CREATED)
 async def create_project(payload: ProjectCreateSchema, current_user: User = Depends(get_current_user)):
     """Creates a new project. Only Managers and Admins can create projects and assign developers."""
@@ -37,23 +42,14 @@ async def create_project(payload: ProjectCreateSchema, current_user: User = Depe
     elif len(dev_ids) == 1:
         lead_id = dev_ids[0]
 
-    new_project = Project(
-        name=payload.name,
-        description=payload.description,
-        developer_ids=dev_ids,
-        lead_developer_id=lead_id,
-        github_frontend=payload.github_frontend,
-        github_backend=payload.github_backend,
-        test_server=payload.test_server,
-        prod_server=payload.prod_server,
-        test_mongodb_url=payload.test_mongodb_url,
-        prod_mongodb_url=payload.prod_mongodb_url,
-        backend_secrets=payload.backend_secrets,
-        frontend_secrets=payload.frontend_secrets,
-        owner_id=str(current_user.id)
-    )
+    project_data = payload.model_dump()
+    project_data["developer_ids"] = dev_ids
+    project_data["lead_developer_id"] = lead_id
+    project_data["owner_id"] = str(current_user.id)
+    
+    new_project = Project(**project_data)
     await new_project.insert()
-    schema = ProjectResponseSchema.model_validate(new_project)
+    schema = to_project_response_schema(new_project)
     schema.owner_name = current_user.name
     dev_names = []
     if new_project.developer_ids:
@@ -103,7 +99,7 @@ async def list_projects(current_user: User = Depends(get_current_user)):
     
     res = []
     for p in projects:
-        schema = ProjectResponseSchema.model_validate(p)
+        schema = to_project_response_schema(p)
         schema.owner_name = user_map.get(p.owner_id, "Unknown")
         schema.developer_names = [user_map.get(d_id, "Unknown") for d_id in p.developer_ids]
         res.append(schema)
@@ -119,7 +115,7 @@ async def get_project(project_id: str, current_user: User = Depends(get_current_
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found"
         )
-    schema = ProjectResponseSchema.model_validate(project)
+    schema = to_project_response_schema(project)
     owner = await User.get(project.owner_id)
     schema.owner_name = owner.name if owner else "Unknown"
     
@@ -192,7 +188,7 @@ async def update_project(project_id: str, payload: ProjectUpdateSchema, current_
     
     await project.save()
     
-    schema = ProjectResponseSchema.model_validate(project)
+    schema = to_project_response_schema(project)
     owner = await User.get(project.owner_id)
     schema.owner_name = owner.name if owner else "Unknown"
     

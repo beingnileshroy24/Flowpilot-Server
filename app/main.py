@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
-from app.routers import auth_router, user_router, task_router, project_router, notification_router, comment_router, activity_log_router, ai_router, copilot_router
+from app.routers import auth_router, user_router, task_router, project_router, notification_router, comment_router, activity_log_router, ai_router, copilot_router, health_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -14,10 +14,15 @@ async def lifespan(app: FastAPI):
     from app.services.sync_queue import start_sync_queue_worker, stop_sync_queue_worker
     await start_sync_queue_worker()
     
+    # Start the health predictor background worker
+    from app.routers.health_router import start_health_predictor_worker, stop_health_predictor_worker
+    await start_health_predictor_worker()
+    
     yield
     
     # Clean up on shutdown
     await stop_sync_queue_worker()
+    await stop_health_predictor_worker()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -50,6 +55,7 @@ app.include_router(comment_router)
 app.include_router(activity_log_router)
 app.include_router(ai_router)
 app.include_router(copilot_router)
+app.include_router(health_router)
 
 @app.get("/")
 async def root():

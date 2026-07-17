@@ -13,3 +13,4 @@ torch
 transformers
 lancedb
 pyarrow
+types-python-dateutil

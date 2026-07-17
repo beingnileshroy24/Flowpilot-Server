@@ -28,4 +28,6 @@ def clean_database():
     db["tasks"].delete_many({})
     db["projects"].delete_many({})
     db["copilot_chats"].delete_many({})
+    db["sprint_predictions"].delete_many({})
+    db["project_health"].delete_many({})
     client.close()

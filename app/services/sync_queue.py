@@ -9,7 +9,7 @@ import uuid
 from app.ai.core.embedder import ModernBertEmbedderSingleton
 from app.ai.storage.lancedb_client import LanceDBManager
 from app.ai.core.splitter import RecursiveParagraphSplitter
-from app.models.task import Task
+from app.models.task import Task, TaskPriority
 from app.models.comment import Comment
 from app.models.project import Project
 from app.models.user import User
@@ -161,6 +161,17 @@ async def _sync_event_to_lancedb(event: dict):
             chunks=[chunk]
         )
         logger.info(f"[SYNC QUEUE] Synced TASK {entity_id} to LanceDB.")
+        
+        # Check for high-priority workspace modifications to trigger recalculation
+        is_high_priority = (
+            task.priority in [TaskPriority.HIGH, TaskPriority.CRITICAL]
+            or getattr(task, "blocked_hours", 0.0) > 0
+        )
+        if is_high_priority:
+            from app.services.prediction_engine import PredictionEngine
+            logger.info(f"[SYNC QUEUE] High-priority workspace modification detected for task {entity_id}. Triggering immediate recalculation.")
+            asyncio.create_task(PredictionEngine.run_project_prediction_pipeline(project_id, force_recalculate=True))
+
 
     elif entity_type == "COMMENT":
         comment = await Comment.get(entity_id)
@@ -191,6 +202,18 @@ async def _sync_event_to_lancedb(event: dict):
             chunks=[chunk]
         )
         logger.info(f"[SYNC QUEUE] Synced COMMENT {entity_id} to LanceDB.")
+        
+        # Check if the comment is for a high priority or blocked task
+        if task:
+            is_high_priority = (
+                task.priority in [TaskPriority.HIGH, TaskPriority.CRITICAL]
+                or getattr(task, "blocked_hours", 0.0) > 0
+            )
+            if is_high_priority:
+                from app.services.prediction_engine import PredictionEngine
+                logger.info(f"[SYNC QUEUE] Comment added/updated on a high-priority task {task.id}. Triggering immediate recalculation.")
+                asyncio.create_task(PredictionEngine.run_project_prediction_pipeline(project_id, force_recalculate=True))
+
 
     elif entity_type == "SPRINT" or entity_type == "DOCUMENT":
         # Index project document subsets: Sprints, Retros, and Requirements

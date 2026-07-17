@@ -102,7 +102,7 @@ async def stop_health_predictor_worker():
 
 # Endpoints
 @router.get("/events")
-async def health_events_stream():
+async def health_events_stream(test: bool = False):
     """
     SSE endpoint to stream health alerts in real-time.
     """
@@ -110,6 +110,9 @@ async def health_events_stream():
         queue = asyncio.Queue()
         sse_connections.append(queue)
         try:
+            yield "data: {\"status\": \"connected\"}\n\n"
+            if test:
+                return
             while True:
                 data = await queue.get()
                 yield data

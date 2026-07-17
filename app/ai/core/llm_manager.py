@@ -145,7 +145,145 @@ class LLMManager:
         Generate mock ReAct planning outputs depending on query keywords.
         """
         prompt_lower = prompt.lower()
-        
+
+        # Handle Project Health Diagnostic or Sprint Risk Predictor queries
+        if "predictive system diagnostic metric input data" in prompt_lower or "[intelligent sprint risk predictor system" in prompt_lower:
+            import re
+            sprint_name = "Sprint 12"
+            failure_likelihood = "84"
+            ci_lower, ci_upper = "79", "88"
+            scope_creep_weight = "+0.42"
+            dev_name = "Alex R."
+            workload_weight = "+0.28"
+            drift_weight = "+0.12"
+            velocity_avg_targeted = "24"
+            velocity_avg_delivered = "14"
+            blocked_tasks_count = "4"
+            
+            sprint_match = re.search(r"Target Boundary:\s*(.*?)\s*Success", prompt)
+            if sprint_match:
+                sprint_name = sprint_match.group(1).strip()
+            
+            metric_match = re.search(r"Calculated Metric Value:\s*(\d+)%", prompt)
+            if metric_match:
+                failure_likelihood = metric_match.group(1)
+                
+            ci_match = re.search(r"Bounds:\s*\[(\d+)%\s*-\s*(\d+)%\]", prompt)
+            if ci_match:
+                ci_lower = ci_match.group(1)
+                ci_upper = ci_match.group(2)
+                
+            creep_match = re.search(r"unplanned_scope_creep_points:\s*\*?\*?\+?(-?\d+\.?\d*)", prompt)
+            if creep_match:
+                scope_creep_weight = creep_match.group(1)
+                if not scope_creep_weight.startswith("+") and not scope_creep_weight.startswith("-"):
+                    scope_creep_weight = "+" + scope_creep_weight
+                    
+            dev_match = re.search(r"assignee_workload_balance\s*\(User:\s*(.*?)\):\s*\*?\*?\+?(-?\d+\.?\d*)", prompt)
+            if dev_match:
+                dev_name = dev_match.group(1).strip()
+                workload_weight = dev_match.group(2)
+                if not workload_weight.startswith("+") and not workload_weight.startswith("-"):
+                    workload_weight = "+" + workload_weight
+                    
+            drift_match = re.search(r"historical_velocity_drift:\s*\*?\*?\+?(-?\d+\.?\d*)", prompt)
+            if drift_match:
+                drift_weight = drift_match.group(1)
+                if not drift_weight.startswith("+") and not drift_weight.startswith("-"):
+                    drift_weight = "+" + drift_weight
+                    
+            vel_match = re.search(r"Velocity Average:\s*(\d+)\s*points\s*targeted\s*vs\s*(\d+)\s*points", prompt)
+            if vel_match:
+                velocity_avg_targeted = vel_match.group(1)
+                velocity_avg_delivered = vel_match.group(2)
+                
+            blocked_match = re.search(r"Active Tasks Blocked:\s*(\d+)", prompt)
+            if blocked_match:
+                blocked_tasks_count = blocked_match.group(1)
+
+            return f"""<think>
+Diagnosing operational failure likelihood for {sprint_name}.
+The current failure score is {failure_likelihood}% (CI: {ci_lower}%-{ci_upper}%).
+Primary risk factor is unplanned scope creep ({scope_creep_weight} risk contribution), followed by developer workload imbalance for {dev_name} ({workload_weight}) and historical velocity drift ({drift_weight}).
+Velocity avg: {velocity_avg_targeted} targeted vs {velocity_avg_delivered} delivered.
+Active blocked: {blocked_tasks_count} critical database tasks.
+Generating final report matching strict blueprint guidelines.
+</think>
+
+### Thought Process
+We are evaluating the diagnostic metrics indicating a **{failure_likelihood}%** probability of failure for **{sprint_name}**. The confidence interval is estimated at **[{ci_lower}% - {ci_upper}%]**.
+- **Scope Creep Impact:** A critical factor contributing +{scope_creep_weight} to risk, signaling substantial unplanned changes.
+- **Resource Allocation:** Over-allocation bottleneck identified on developer **{dev_name}** (+{workload_weight} risk contribution).
+- **Velocity Deficit:** Historical averages indicate the team regularly slips targets ({velocity_avg_targeted} targeted vs {velocity_avg_delivered} delivered), creating a risk factor of +{drift_weight}.
+- **Blocked Path:** There are {blocked_tasks_count} active database component tasks that are blocked, presenting a severe risk to sprint delivery.
+
+### Risk Analysis
+The operational analysis indicates a **High Risk Profile** status with a calculated **{failure_likelihood}% Failure Likelihood Score**. 
+- **Scope Creep:** The addition of unplanned features during the active sprint has consumed crucial buffer hours.
+- **Developer Bottleneck:** **{dev_name}** is overloaded beyond standard task capacity, which threatens task completion rates.
+- **Historical Delivery Lag:** An average drift of {velocity_avg_targeted} planned points vs {velocity_avg_delivered} delivered points creates a structural planning deficit.
+- **Blocked Database Dependencies:** The {blocked_tasks_count} blocked database component tasks must be cleared to allow frontend and API integrations to proceed.
+
+### Actionable Recommendations
+- **Enforce Scope Lock:** Do not accept any new story points or tasks into {sprint_name} mid-sprint.
+- **Balance Team Capacity:** Reassign minor tasks from **{dev_name}** to team members with lower utilization.
+- **Calibrate Planning Estimates:** Reduce the capacity estimates in upcoming sprints to match the true delivered average of {velocity_avg_delivered} points.
+- **Clear Critical Blockers:** Deploy senior resources to immediately resolve the {blocked_tasks_count} blocked database component tasks.
+"""
+
+        # Handle Project Health synthesis queries
+        if "[intelligent project health engine]" in prompt_lower or "project health status" in prompt_lower:
+            import re
+            project_name = "this project"
+            health_score = "84.0"
+            project_status = "WARNING"
+            avg_task_risk = "40.0"
+            avg_burnout_risk = "50.0"
+            sprint_risk = "84.0"
+
+            pname_match = re.search(r"project\s*'(.*?)'", prompt)
+            if pname_match:
+                project_name = pname_match.group(1)
+            
+            score_match = re.search(r"Health Score:\s*(\d+\.?\d*)/100", prompt)
+            if score_match:
+                health_score = score_match.group(1)
+                
+            status_match = re.search(r"Status:\s*(\w+)", prompt)
+            if status_match:
+                project_status = status_match.group(1)
+                
+            trisk_match = re.search(r"Average Task Delay Risk:\s*(\d+\.?\d*)%", prompt)
+            if trisk_match:
+                avg_task_risk = trisk_match.group(1)
+                
+            brisk_match = re.search(r"Average Developer Burnout Risk:\s*(\d+\.?\d*)%", prompt)
+            if brisk_match:
+                avg_burnout_risk = brisk_match.group(1)
+                
+            srisk_match = re.search(r"Active Sprint Failure Risk:\s*(\d+\.?\d*)%", prompt)
+            if srisk_match:
+                sprint_risk = srisk_match.group(1)
+
+            return f"""<think>
+Evaluating overall health for project {project_name}.
+Health Score is {health_score}/100, Status is {project_status}.
+Key risks include Average Task Delay Risk ({avg_task_risk}%), Developer Burnout ({avg_burnout_risk}%), and Sprint Failure Risk ({sprint_risk}%).
+Formulating summary report.
+</think>
+
+### Project Status Summary
+Project '{project_name}' currently holds a **{project_status}** operational status with an overall Health Score of **{health_score}/100**. This score is pulled from a weighted combination of task-level delay risks ({avg_task_risk}%), team burnout indexes ({avg_burnout_risk}%), and active sprint failure probability ({sprint_risk}%).
+
+### Burnout & Workload Concerns
+The team is experiencing a burnout risk level of **{avg_burnout_risk}%**. This is driven by multiple context-switching overheads and over-assignment of tasks. Key resources are working on multiple complex modules simultaneously, which increases cognitive load and results in staging deployment delays.
+
+### Actionable Roadmap Mitigations
+- **Conduct Workload Redistribution:** Rebalance task assignments to prevent overloading single developers.
+- **Improve Task Resolution Speed:** Focus on tasks with high delay risk ({avg_task_risk}%) before picking up new roadmap tasks.
+- **Implement Sprint Buffer:** Allocate a 20% capacity buffer in upcoming sprints to reduce context switching and lower burnout.
+"""
+
         # Scenario 1: Blockers or Sprint 8 query
         if "sprint 8" in prompt_lower or "blocker" in prompt_lower:
             return (

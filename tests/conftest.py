@@ -4,6 +4,7 @@ import asyncio
 
 # Set test environment database name before loading any app modules
 os.environ["DATABASE_NAME"] = "flowpilot_test"
+os.environ["USE_MOCK_LLM"] = "True"
 
 from fastapi.testclient import TestClient
 from app.main import app

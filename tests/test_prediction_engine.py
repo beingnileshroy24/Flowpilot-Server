@@ -6,11 +6,13 @@ from app.models.task import Task, TaskStatus, TaskPriority
 from app.models.user import User, UserRole
 from app.services.feature_service import FeatureService
 from app.services.prediction_engine import PredictionEngine
+from app.database import init_db
 from app.models.project_health import ProjectHealth
 from app.models.sprint_prediction import SprintPrediction
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_feature_extraction_empty_and_baselines(client: TestClient):
+    await init_db()
     # Tests FeatureService empty fallback and missing value baselines.
     # 1. Create a dummy project
     sprint_id = "sprint-test-empty"
@@ -42,6 +44,7 @@ async def test_feature_extraction_empty_and_baselines(client: TestClient):
         project_id=str(project.id),
         type="TASK",
         title="Test Task",
+        description="Testing feature extraction task",
         status=TaskStatus.TODO,
         priority=TaskPriority.HIGH,
         sprint_id=sprint_id,
@@ -56,13 +59,14 @@ async def test_feature_extraction_empty_and_baselines(client: TestClient):
     assert partial_vector["sentiment_volatility"] == FeatureService.SENTINEL_VOLATILITY_BASELINE
     assert len(partial_vector["burndown_history"]) == 10
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_onnx_prediction_bounds_and_cache(client: TestClient):
+    await init_db()
     # 1. Create a dummy user
     user = User(
         name="Test Lead",
         email="testlead@example.com",
-        password="hashedpassword",
+        hashed_password="hashedpassword",
         role=UserRole.MANAGER
     )
     await user.insert()
@@ -92,6 +96,7 @@ async def test_onnx_prediction_bounds_and_cache(client: TestClient):
         project_id=str(project.id),
         type="TASK",
         title="Task 1",
+        description="ONNX test task",
         status=TaskStatus.TODO,
         priority=TaskPriority.HIGH,
         sprint_id=sprint_id,
@@ -108,8 +113,8 @@ async def test_onnx_prediction_bounds_and_cache(client: TestClient):
     # Run predictions second time (should hit cache)
     health2 = await PredictionEngine.run_project_prediction_pipeline(str(project.id), force_recalculate=False)
     assert health2 is not None
-    # Verify it returned the cached object by checking they have the same created_at
-    assert health1.created_at == health2.created_at
+    # Verify it returned the cached object by checking they have the same ID
+    assert health1.id == health2.id
 
     # Run predictions third time with force_recalculate=True (should bypass cache)
     health3 = await PredictionEngine.run_project_prediction_pipeline(str(project.id), force_recalculate=True)

@@ -108,8 +108,7 @@ def test_health_predictor_flow(client: TestClient):
     assert "failure_rate" in sprint_data
     assert len(sprint_data["burndown_trajectory"]) > 0
 
-    # 8. Test SSE events endpoint
-    response = client.get("/api/v1/health/events", headers=headers)
-    # Stream endpoints can be tested by making a request and closing or reading headers
-    assert response.status_code == 200
-    assert "text/event-stream" in response.headers["content-type"]
+    # 8. Test SSE events endpoint (using test=true to close stream immediately and prevent hanging)
+    with client.stream("GET", "/api/v1/health/events?test=true", headers=headers) as response:
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]

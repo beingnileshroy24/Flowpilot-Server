@@ -9,38 +9,43 @@ from app.ai.core.agent_engine import AgentEngine
 def test_token_counter_and_pruning():
     engine = AgentEngine()
     
-    # Verify token counter works
-    text = "Hello world from flowpilot server!"
-    token_count = engine.count_tokens(text)
-    assert token_count > 0
+    # Mock tokenizer to ensure consistent token calculation independent of mlx-lm model download
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.encode = lambda x: [0] * (len(x) // 5)
+    
+    with patch("app.ai.core.agent_engine.llm_manager.tokenizer", mock_tokenizer):
+        # Verify token counter works
+        text = "Hello world from flowpilot server!"
+        token_count = engine.count_tokens(text)
+        assert token_count > 0
 
-    # Verify context assembly and pruning at 100 tokens (approx 2 blocks)
-    mock_items = [
-        {
-            "entity_type": "TASK",
-            "source_id": "task_1",
-            "content_snippet": "Setup staging database credentials.",
-            "metadata": {"title": "Staging DB", "citation_hash": "cit_1"}
-        },
-        {
-            "entity_type": "TASK",
-            "source_id": "task_2",
-            "content_snippet": "Configure oauth SSO setup.",
-            "metadata": {"title": "SSO Setup", "citation_hash": "cit_2"}
-        },
-        {
-            "entity_type": "TASK",
-            "source_id": "task_3",
-            "content_snippet": "Unrelated backlog task content.",
-            "metadata": {"title": "Backlog Task", "citation_hash": "cit_3"}
-        }
-    ]
+        # Verify context assembly and pruning at 100 tokens (approx 2 blocks)
+        mock_items = [
+            {
+                "entity_type": "TASK",
+                "source_id": "task_1",
+                "content_snippet": "Setup staging database credentials.",
+                "metadata": {"title": "Staging DB", "citation_hash": "cit_1"}
+            },
+            {
+                "entity_type": "TASK",
+                "source_id": "task_2",
+                "content_snippet": "Configure oauth SSO setup.",
+                "metadata": {"title": "SSO Setup", "citation_hash": "cit_2"}
+            },
+            {
+                "entity_type": "TASK",
+                "source_id": "task_3",
+                "content_snippet": "Unrelated backlog task content.",
+                "metadata": {"title": "Backlog Task", "citation_hash": "cit_3"}
+            }
+        ]
 
-    # Prune at 100 tokens
-    pruned = engine._assemble_and_prune_context(mock_items, max_tokens=100)
-    assert "cit_1" in pruned
-    assert "cit_2" in pruned
-    assert "cit_3" not in pruned  # should be pruned out
+        # Prune at 100 tokens
+        pruned = engine._assemble_and_prune_context(mock_items, max_tokens=100)
+        assert "cit_1" in pruned
+        assert "cit_2" in pruned
+        assert "cit_3" not in pruned  # should be pruned out
 
 @pytest.mark.anyio
 async def test_agent_engine_process_query_flow():

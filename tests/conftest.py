@@ -31,4 +31,5 @@ def clean_database():
     db["copilot_chats"].delete_many({})
     db["sprint_predictions"].delete_many({})
     db["project_health"].delete_many({})
+    db["activity_logs"].delete_many({})
     client.close()

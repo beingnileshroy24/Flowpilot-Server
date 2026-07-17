@@ -7,7 +7,7 @@ from typing import Optional
 class ActivityLogResponseSchema(BaseModel):
     id: PydanticObjectId
     task_id: Optional[str] = None
-    project_id: str
+    project_id: Optional[str] = None
     user_id: str
     user_name: str
     action: str

@@ -6,7 +6,7 @@ from typing import Optional
 
 class ActivityLog(Document):
     task_id: Optional[str] = None
-    project_id: str
+    project_id: Optional[str] = None
     user_id: str
     user_name: str
     action: str  # e.g. "status_change", "assignment_change", "comment_added", "task_created"

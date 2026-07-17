@@ -178,6 +178,13 @@ class PredictionEngine:
 
         tasks = await Task.find(Task.project_id == project_id).to_list()
 
+        # Early exit: No meaningful data to analyze
+        active_sprint_exists = active_sprint is not None
+        has_developers = len(project.developer_ids) > 0 or project.lead_developer_id is not None
+        if not tasks and not active_sprint_exists and not has_developers:
+            logger.warning(f"Project {project_id} has no tasks, no active sprint, and no developers. Skipping health prediction.")
+            return None
+
         # 1. Task-Level Predictions
         task_delay_risks: List[Dict[str, Any]] = []
         for task in tasks:

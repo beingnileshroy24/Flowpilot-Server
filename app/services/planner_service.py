@@ -29,5 +29,6 @@ class PlannerService:
             "assigned_tasks": solver_result.get("assigned_tasks", []),
             "dropped_tasks": solver_result.get("dropped_tasks", []),
             "explanation": explanation,
-            "solver_status": solver_result.get("solver_status")
+            "solver_status": solver_result.get("solver_status"),
+            "dev_capacities": solver_result.get("dev_capacities", {})
         }

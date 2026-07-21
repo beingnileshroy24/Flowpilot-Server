@@ -141,7 +141,7 @@ class FeatureService:
             burndown_history = []
             for i in range(10):
                 val = total_points - (total_points - remaining_points) * (i / 9.0)
-                burndown_history.append(float(round(val, 2)))
+                burndown_history.append(round(val, 2))
         else:
             logger.warning(f"Total points is 0 for sprint_id={sprint_id}. Replacing burndown history with baseline.")
             burndown_history = FeatureService.BURNDOWN_HISTORY_BASELINE

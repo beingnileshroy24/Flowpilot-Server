@@ -8,6 +8,7 @@ from app.routers.activity_log_router import router as activity_log_router
 from app.routers.ai_router import router as ai_router
 from app.routers.copilot_router import router as copilot_router
 from app.routers.health_router import router as health_router
+from app.routers.planner_router import router as planner_router
 
 __all__ = [
     "auth_router",
@@ -20,4 +21,5 @@ __all__ = [
     "ai_router",
     "copilot_router",
     "health_router",
+    "planner_router",
 ]

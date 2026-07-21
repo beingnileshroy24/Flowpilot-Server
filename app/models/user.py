@@ -20,6 +20,7 @@ class User(Document):
     hashed_password: str
     role: UserRole
     status: UserStatus = UserStatus.ACTIVE
+    skills: list[str] = []
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Settings:

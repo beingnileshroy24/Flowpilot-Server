@@ -15,3 +15,4 @@ lancedb
 pyarrow
 types-python-dateutil
 onnxruntime
+ortools

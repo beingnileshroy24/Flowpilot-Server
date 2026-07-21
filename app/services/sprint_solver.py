@@ -136,7 +136,8 @@ class SprintSolver:
                             "assignee_name": dev.name,
                             "estimated_hours": task.estimated_hours,
                             "priority": task.priority.value,
-                            "delay_risk": task_risks.get(str(task.id), 0.0)
+                            "delay_risk": task_risks.get(str(task.id), 0.0),
+                            "dependency_ids": task.dependency_ids
                         })
                         is_assigned = True
                 if not is_assigned:
@@ -145,7 +146,8 @@ class SprintSolver:
                         "title": task.title,
                         "estimated_hours": task.estimated_hours,
                         "priority": task.priority.value,
-                        "delay_risk": task_risks.get(str(task.id), 0.0)
+                        "delay_risk": task_risks.get(str(task.id), 0.0),
+                        "dependency_ids": task.dependency_ids
                     })
         else:
             logger.warning("CP-SAT solver could not find a feasible solution.")
@@ -156,7 +158,8 @@ class SprintSolver:
                     "title": task.title,
                     "estimated_hours": task.estimated_hours,
                     "priority": task.priority.value,
-                    "delay_risk": task_risks.get(str(task.id), 0.0)
+                    "delay_risk": task_risks.get(str(task.id), 0.0),
+                    "dependency_ids": task.dependency_ids
                 })
 
         return {

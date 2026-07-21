@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 
 from app.services.planning_aggregator import PlanningAggregator
 from app.services.sprint_solver import SprintSolver
-from app.services.plan_explainer import PlanExplainer
+from app.ai.prompts.plan_explainer import PlanExplainer
 
 logger = logging.getLogger("planner_service")
 
